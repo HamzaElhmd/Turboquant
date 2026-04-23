@@ -4,6 +4,8 @@
 #include <complex.h>
 #include <stdint.h>
 
+#define INITIAL_N_MAPS 0x3F
+
 /* Error MACROS */
 #define HMAP_SUCCESS 0b0000
 #define ERR_HMAP_NULL 0b0001

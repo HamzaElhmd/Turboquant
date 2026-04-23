@@ -3,8 +3,6 @@
 
 #include "../include/hash_map.h"
 
-#define INITIAL_N_MAPS 0xFFF
-
 hash_map_t* hash_map_init() {
     hash_map_t *hmap = (hash_map_t*) malloc(sizeof(hash_map_t));
     if (hmap == NULL)
@@ -18,7 +16,7 @@ hash_map_t* hash_map_init() {
     }
     hmap->map_capacity = INITIAL_N_MAPS;
 
-    return NULL;
+    return hmap;
 }
 
 void hash_map_destroy(hash_map_t **hmap) {
@@ -43,7 +41,7 @@ uint16_t hash(const float key) {
     bits *= 0x846ca68b;
     bits ^= bits >> 16;
 
-    return bits & 0xFFF;
+    return bits & 0x3F;
 }
 
 uint8_t hash_map_add (hash_map_t *hmap, const float key, const uint8_t value) {
