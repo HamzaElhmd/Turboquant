@@ -7,9 +7,6 @@
 #define INITIAL_N_MAPS 0x3F
 
 /* Error MACROS */
-#define HMAP_SUCCESS 0b0000
-#define ERR_HMAP_NULL 0b0001
-#define ERR_HMAP_UNINIT 0b0011
 
 /* A structure for a unit map key->value */
 typedef struct {

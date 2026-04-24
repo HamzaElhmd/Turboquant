@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../include/errors.h"
 #include "../include/hash_map.h"
 
 hash_map_t* hash_map_init() {
@@ -46,14 +47,14 @@ uint16_t hash(const float key) {
 
 uint8_t hash_map_add (hash_map_t *hmap, const float key, const uint8_t value) {
     if (hmap == NULL)
-        return ERR_HMAP_NULL;
+        return HMAP_NULL;
     else if (hmap->items == NULL)
-        return ERR_HMAP_UNINIT;
+        return HMAP_UNINIT;
     
     uint16_t index = hash(key), i = index;
 
     while (i != index - 1) {
-        if (i == hmap->map_capacity - 1) 
+        if (i == hmap->map_capacity) 
             i = 0;
         
         if (hmap->items[i].is_set == 0b0) {
@@ -71,9 +72,9 @@ uint8_t hash_map_add (hash_map_t *hmap, const float key, const uint8_t value) {
 
 uint8_t hash_map_del(hash_map_t *hmap, const float key) {
     if (hmap == NULL)
-        return ERR_HMAP_NULL;
+        return HMAP_NULL;
     else if (hmap->items == NULL)
-        return ERR_HMAP_UNINIT;
+        return HMAP_UNINIT;
 
     uint16_t index = hash(key);
 
