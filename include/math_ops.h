@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #define N 10000
+#define PI 3.14159265358979323846264338327950288f
 
 typedef struct {
         float value;
@@ -13,13 +14,15 @@ typedef struct {
 } centroid;
 
 typedef struct {
-        float k;
+        size_t n_centroids;
         centroid *centroids;
 } codebook;
 
 void destroy_codebook(codebook **cdb);
 
 codebook* init_codebook(const uint16_t n);
+
+float compute_l2_norm(const float *vec, const size_t d);
 
 /* Calculate the L2 norm of input vectors to ensure length is 1,
  * projecting the vector on the hypersphere S^d-1 */

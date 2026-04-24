@@ -7,6 +7,18 @@
 #include "../include/lin_alg.h"
 #include "../include/errors.h"
 
+float compute_l2_norm(const float *vec, const size_t d) {
+    if (vec == NULL || d == 0)
+        return -1.0f;
+
+    float l2_norm = 0.0f;
+
+    for (int i = 0; i < d; i++)
+        l2_norm += (vec[i] * vec[i]);
+
+    return sqrtf(l2_norm);
+}
+
 /* Involve vectorization for parallel processing */
 uint8_t l2_normalization(float *vec, const size_t d) {
     if (vec == NULL)
@@ -14,12 +26,9 @@ uint8_t l2_normalization(float *vec, const size_t d) {
     else if (d == 0)
         return MATH_OPS_EMPTY; 
 
-    float l2_norm = 0.0f;
-
-    for (int i = 0; i < d; i++)
-        l2_norm += (vec[i] * vec[i]);
-
-    l2_norm = sqrtf(l2_norm);
+    float l2_norm = compute_l2_norm(vec, d);
+    if (l2_norm < 0.0f)
+        return MATH_L2_FAILED;
 
     if (l2_norm < 1e-12f) return MATH_L2_FAILED;
 
@@ -28,8 +37,6 @@ uint8_t l2_normalization(float *vec, const size_t d) {
 
     return MATH_OPS_SUCCESS;
 }
-
-#define PI 3.14159265358979323846264338327950288f
 
 float** normal_distribution_random_matrix(const uint16_t n) {
     if (n == 0)
@@ -234,6 +241,8 @@ codebook* init_codebook(const uint16_t n) {
         destroy_codebook(&cdb);
         return NULL;
     }
+
+    cdb->n_centroids = n;
 
     return cdb;
 }
