@@ -39,6 +39,10 @@ uint8_t init_turboquant(const size_t dim, const uint8_t bit_width);
 
 void clean_turboquant();
 
+uint8_t init_load_turboquant(const char *filename);
+
+uint8_t save_turboquant(const char *filename);
+
 turbo_quantizer* init_quantizer(const size_t dims, const uint8_t bit_width);
 
 void destroy_quantizer(turbo_quantizer **quantizer);

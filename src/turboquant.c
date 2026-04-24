@@ -3,6 +3,7 @@
 #include "../include/errors.h"
 #include "../include/config.h"
 #include "../include/lin_alg.h"
+#include <stdio.h>
 #include <complex.h>
 #include <math.h>
 #include <stdlib.h>
@@ -116,6 +117,83 @@ void clean_turboquant() {
         destroy_quantizer(&mse_quantizer);
 
     is_init = 0;
+}
+
+
+uint8_t init_load_turboquant(const char *filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return QUANT_INIT_FAILED;
+
+    // Clean any existing global quantizer before loading a new one
+    if (mse_quantizer) clean_turboquant();
+
+    size_t dims;
+    uint8_t bit_width;
+
+    // 1. Read Metadata
+    if (fread(&dims, sizeof(size_t), 1, f) != 1) { fclose(f); return QUANT_INIT_FAILED; }
+    if (fread(&bit_width, sizeof(uint8_t), 1, f) != 1) { fclose(f); return QUANT_INIT_FAILED; }
+
+    // Allocate the container
+    mse_quantizer = (turbo_quantizer*) malloc(sizeof(turbo_quantizer));
+    if (!mse_quantizer) { fclose(f); return QUANT_INIT_FAILED; }
+
+    mse_quantizer->dims = dims;
+    mse_quantizer->bit_width = bit_width;
+
+    // 2. Read Codebook
+    mse_quantizer->book = (codebook*) malloc(sizeof(codebook));
+    if (!mse_quantizer->book) { fclose(f); return QUANT_INIT_FAILED; }
+
+    fread(&mse_quantizer->book->n_centroids, sizeof(size_t), 1, f);
+    uint16_t n = mse_quantizer->book->n_centroids;
+    mse_quantizer->book->centroids = (centroid*) malloc(sizeof(centroid) * n);
+    fread(mse_quantizer->book->centroids, sizeof(centroid), n, f);
+
+    // 3. Re-allocate and Read Matrices
+    mse_quantizer->Π = create_mtx(dims, dims);
+    mse_quantizer->t_Π = create_mtx(dims, dims);
+    mse_quantizer->S = create_mtx(dims, dims);
+    mse_quantizer->t_S = create_mtx(dims, dims);
+
+    for (size_t i = 0; i < dims; i++) {
+        fread(mse_quantizer->Π[i], sizeof(float), dims, f);
+        fread(mse_quantizer->t_Π[i], sizeof(float), dims, f);
+        fread(mse_quantizer->S[i], sizeof(float), dims, f);
+        fread(mse_quantizer->t_S[i], sizeof(float), dims, f);
+    }
+
+    fclose(f);
+    is_init = 1;
+    return QUANT_SUCCESS;
+}
+
+uint8_t save_turboquant(const char *filename) {
+    if (!is_init || mse_quantizer == NULL) {
+        return QUANT_UNINITIALIZED;
+    }
+
+    FILE *f = fopen(filename, "wb");
+    if (!f) return QUANT_PROD_FAILED;
+
+    // 1. Metadata: Dimensions and Bit-width
+    fwrite(&mse_quantizer->dims, sizeof(size_t), 1, f);
+    fwrite(&mse_quantizer->bit_width, sizeof(uint8_t), 1, f);
+
+    // 2. Codebook: Centroid values and boundaries
+    fwrite(&mse_quantizer->book->n_centroids, sizeof(size_t), 1, f);
+    fwrite(mse_quantizer->book->centroids, sizeof(centroid), mse_quantizer->book->n_centroids, f);
+
+    // 3. Matrices: Save all 4 pre-computed matrices
+    for (size_t i = 0; i < mse_quantizer->dims; i++) {
+        fwrite(mse_quantizer->Π[i], sizeof(float), mse_quantizer->dims, f);
+        fwrite(mse_quantizer->t_Π[i], sizeof(float), mse_quantizer->dims, f);
+        fwrite(mse_quantizer->S[i], sizeof(float), mse_quantizer->dims, f);
+        fwrite(mse_quantizer->t_S[i], sizeof(float), mse_quantizer->dims, f);
+    }
+
+    fclose(f);
+    return QUANT_SUCCESS;
 }
 
 quantization_result* init_quantization_result() {
@@ -372,19 +450,24 @@ uint8_t prod_quantization(float *x, quantization_result *results) {
         return QUANT_PROD_FAILED;
     }
 
-    uint8_t *qjl = (uint8_t*) malloc(mse_quantizer->dims);
-    if (qjl == NULL) {
+    size_t qjl_bytes = mse_quantizer->dims / 8;
+    uint8_t *qjl_packed = (uint8_t *) malloc(qjl_bytes);
+    if (qjl_packed == NULL) {
         free(bstring);
         free_vec(x_hat);
         free_vec(residual);
         free_vec(result);
         return QUANT_PROD_FAILED;
     }
-    /* Put in qjl vector the signs of the resulting vector */
-    for (int i = 0; i < mse_quantizer->dims; i++)
-        qjl[i] = (result[i] < 0.0f) ? 1 : 0;
+    memset(qjl_packed, 0, qjl_bytes);
 
-    results->qjl = qjl;
+    /* Put in qjl vector the signs of the resulting vector */
+    for (int i = 0; i < mse_quantizer->dims; i++) {
+        uint8_t sign_bit = (result[i] < 0.0f) ? 1 : 0;
+        pack_dynamic(qjl_packed, i, 1, sign_bit);
+    }
+
+    results->qjl = qjl_packed;
     results->bstring = bstring;
     results->residual_l2 = compute_l2_norm(residual, mse_quantizer->dims);
 
@@ -412,6 +495,13 @@ float* prod_dequantization(const quantization_result *res) {
         free_vec(x_mse);
         return NULL;
     }
+    
+    for (size_t i = 0; i < d; i++) {
+        uint8_t sign_bit = unpack_dynamic(res->qjl, i, 1);
+
+        qj1_floats[i] = (sign_bit == 1) ? -1.0f : 1.0f;
+    }
+
 
     /* Convert the binary qjl values back to floats {-1, 1} */
     /* Note: If you pack these into bits later, you'll use unpack_dynamic here */

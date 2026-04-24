@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "../include/config.h"
 #include "../include/math_ops.h"
 #include "../include/lin_alg.h"
 #include "../include/errors.h"
