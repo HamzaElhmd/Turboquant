@@ -22,7 +22,7 @@ int main() {
     // 2. Run the heavy initialization
     // We use BIT_WIDTH - 1 because Algorithm 2 requires one bit 
     // to be reserved for the QJL residual sign.
-    uint8_t status = init_turboquant(DIMENSIONS, BIT_WIDTH - 1);
+    uint8_t status = turboquant_init(DIMENSIONS, BIT_WIDTH - 1);
 
     if (status != QUANT_SUCCESS) {
         fprintf(stderr, "Error: Failed to initialize TurboQuant context.\n");
@@ -33,12 +33,12 @@ int main() {
 
     // 3. Serialize to disk
     const char *filename = "turboquant_1536_2bit.bin";
-    if (save_turboquant(filename) == QUANT_SUCCESS) {
+    if (turboquant_save(filename) == QUANT_SUCCESS) {
         printf("\033[32mSuccess: Context saved to '%s'\033[0m\n", filename);
         printf("You can now load this file in your PoC to bypass training.\n");
     } else {
         fprintf(stderr, "Error: Failed to save context to disk.\n");
-        clean_turboquant();
+        turboquant_clean();
         return 1;
     }
 
