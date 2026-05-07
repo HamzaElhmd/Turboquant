@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <wchar.h>
 #include "../include/turboquant.h"
 #include "../include/config.h"
 #include "../include/errors.h"
@@ -43,6 +42,6 @@ int main() {
     }
 
     // 4. Cleanup and Exit
-    clean_turboquant();
+    turboquant_clean();
     return 0;
 }

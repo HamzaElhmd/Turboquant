@@ -20,9 +20,6 @@ void codebook_destroy(codebook **cdb);
 
 codebook* codebook_init(const uint16_t n);
 
-/* Generate a random Normal distribution matrix and QR decomposition, 
- * induces  Beta distribution on the coordinates */
-
 /* Beta distribution probability density function (normalized on a hypersphere space S^d-1)*/
 float codebook_scaled_beta_pdf(const float x, const size_t d);
 
