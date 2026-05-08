@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include "../include/lin_alg.h"
+#include "../include/errors.h"
 
 /* TODO: Implement separation of concern between memory management and processing */
 

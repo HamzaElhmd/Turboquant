@@ -137,6 +137,8 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         (*context)->h_bstring = NULL, (*context)->d_bstring = NULL, (*context)->h_qjl = NULL,
         (*context)->d_qjl = NULL, (*context)->compute_stream = NULL;
 
+    (*context)->cublas_handle = NULL;
+
     (*context)->mse_quantizer = turboquant_quantizer_init(dims, bit_width);
     if ((*context)->mse_quantizer == NULL) {
         turboquant_clean(*context);
