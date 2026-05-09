@@ -9,10 +9,6 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-#include <cublas.h>
-
-/* The cuBLAS handle must be initialized externally then assigned to the context struct */
-#define CUBLAS_HANDLE(ptr) (cublasHandle_t) ptr
 
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
@@ -32,11 +28,15 @@ void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     }
 }
 
-// Add this helper to turboquant.cu
 static uint8_t sync_centroids(turbo_quantizer *q) {
     if (!q || !q->book) return QUANT_NULL;
     
     size_t n = q->book->n_centroids;
+
+    if (q->d_centroids != NULL) {
+        cudaFree(q->d_centroids);
+        q->d_centroids = NULL;
+    }
     
     if (cudaMalloc(&q->d_centroids, n * sizeof(float)) != cudaSuccess)
         return QUANT_NULL;
@@ -137,8 +137,6 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         (*context)->h_bstring = NULL, (*context)->d_bstring = NULL, (*context)->h_qjl = NULL,
         (*context)->d_qjl = NULL, (*context)->compute_stream = NULL;
 
-    (*context)->cublas_handle = NULL;
-
     (*context)->mse_quantizer = turboquant_quantizer_init(dims, bit_width);
     if ((*context)->mse_quantizer == NULL) {
         turboquant_clean(*context);
@@ -180,9 +178,10 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     }
 
     (*context)->compute_stream = (void *)stream;
-
-    if ((*context)->cublas_handle) {
-        cublasSetStream_v2(CUBLAS_HANDLE((*context)->cublas_handle), stream);
+    if (lin_alg_set_stream((*context)->compute_stream) != SUCCESS) {
+        turboquant_clean(*context);
+        free(*context);
+        return QUANT_INIT_FAILED;
     }
 
     (*context)->is_init = 1;
@@ -192,6 +191,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
 void turboquant_context_destroy(turboquant_context_t **context) {
     if (context) {
         turboquant_clean(*context);
+        lin_alg_runtime_shutdown();
         free(*context);
         *context = NULL;
     }
@@ -280,11 +280,8 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         if (cudaStreamCreate(&stream) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; };
 
         context->compute_stream = (void *)stream;
-
-        if (context->cublas_handle) {
-            cublasSetStream_v2(CUBLAS_HANDLE(context->cublas_handle), stream);
-        }
     }
+    if (lin_alg_set_stream(context->compute_stream) != SUCCESS) { error_code = QUANT_INIT_FAILED; goto cleanup; }
     
     b_size = ((dims * bit_width + 31) / 32) * 4;
     if (context->h_bstring) {
@@ -477,7 +474,7 @@ float turboquant_mean_squared_error(turboquant_context_t *context, const vector_
  * @param b: The bit width (e.g., 2)
  * @param value: The index of the centroid (e.g., 3)
  */
-void pack_dynamic(uint8_t *buffer, size_t dim_index, uint8_t b, uint8_t value) {
+void turboquant_pack_dynamic(uint8_t *buffer, size_t dim_index, uint8_t b, uint8_t value) {
     size_t total_bits = dim_index * b;
     size_t byte_pos = total_bits / 8;
     uint8_t bit_offset = total_bits % 8;
@@ -499,7 +496,7 @@ void pack_dynamic(uint8_t *buffer, size_t dim_index, uint8_t b, uint8_t value) {
     }
 }
 
-uint8_t unpack_dynamic(const uint8_t *buffer, size_t dim_index, uint8_t b) {
+uint8_t turboquant_unpack_dynamic(const uint8_t *buffer, size_t dim_index, uint8_t b) {
     size_t total_bits = dim_index * b;
     size_t byte_pos = total_bits / 8;
     uint8_t bit_offset = total_bits % 8;
@@ -515,6 +512,12 @@ uint8_t unpack_dynamic(const uint8_t *buffer, size_t dim_index, uint8_t b) {
     return (uint8_t)((window >> bit_offset) & ((1 << b) - 1));
 }
 
+
+__device__ static inline void turboquant_atomic_or_byte(uint8_t* base_addr, size_t pos, uint8_t val) {
+    unsigned int* word_ptr = (unsigned int*)(base_addr + (pos & ~3));
+    uint32_t shift = (pos & 3) * 8;
+    atomicOr(word_ptr, (uint32_t)val << shift);
+}
 
 __global__ void turbo_quant_fused_kernel(
     const float* y,
@@ -548,21 +551,13 @@ __global__ void turbo_quant_fused_kernel(
     uint8_t clean_value = (uint8_t)best_idx & ((1 << bit_width) - 1);
     uint16_t shifted_val = (uint16_t)clean_value << bit_offset;
 
-    // Helper to handle the atomic write to a specific byte via a 32-bit word
-    auto atomicOrByte = [](uint8_t* base_addr, size_t pos, uint8_t val) {
-    // 1. Find the start of the 4-byte chunk (must be 4-byte aligned)
-    unsigned int* word_ptr = (unsigned int*)(base_addr + (pos & ~3));
-    // 2. Find the byte's position within that 4-byte chunk (0, 1, 2, or 3)
-    uint32_t shift = (pos & 3) * 8;
-    // 3. Perform the 32-bit atomic OR
-    atomicOr(word_ptr, (uint32_t)val << shift);};
 
     // Write the first byte
-    atomicOrByte(d_bstring, byte_pos, (uint8_t)(shifted_val & 0xFF));
+    turboquant_atomic_or_byte(d_bstring, byte_pos, (uint8_t)(shifted_val & 0xFF));
 
     // Handle the cross-byte boundary (The "Straddle")
     if (bit_offset + bit_width > 8) {
-        atomicOrByte(d_bstring, byte_pos + 1, (uint8_t)(shifted_val >> 8));
+        turboquant_atomic_or_byte(d_bstring, byte_pos + 1, (uint8_t)(shifted_val >> 8));
     }
 }
 

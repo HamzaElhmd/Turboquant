@@ -2,17 +2,12 @@
 #define QUANTIZATION_H
 
 #include <complex.h>
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
+#include "codebook.h"
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-#include "../include/codebook.h"
-
-#ifdef __cplusplus
-}
 #endif
 
 /* TODO: USE config.h for MAX_ITERATIONS, N, and BIT_WIDTH, MAYBE
@@ -41,9 +36,6 @@ typedef struct {
         float residual_l2;
 } quantization_result;
 
-/* cublas handle pointer is set at beginning of thread
- * manually by the user 
- * */
 typedef struct {
         turbo_quantizer *mse_quantizer;
         vector_t *mse_buffer;
@@ -52,18 +44,16 @@ typedef struct {
         uint8_t *h_bstring;
         uint8_t *d_bstring;
         size_t bstring_size;
-       
+
         uint8_t *h_qjl;
         uint8_t *d_qjl;
         size_t qjl_size;
 
-        void *cublas_handle;
         void *compute_stream;
         uint8_t is_init;
 } turboquant_context_t;
 
-uint8_t turboquant_init(turboquant_context_t **context, const size_t dim, 
-        const uint8_t bit_width);
+uint8_t turboquant_init(turboquant_context_t **context, const size_t dim, const uint8_t bit_width);
 
 void turboquant_clean(turboquant_context_t *context);
 
@@ -86,14 +76,13 @@ void turboquant_quantization_result_destroy(quantization_result **results);
 float turboquant_mean_squared_error(turboquant_context_t *context, const vector_t *vec_1,
                 const vector_t *vec_2);
 
-
 void turboquant_pack_dynamic(uint8_t *buffer, size_t dim_index, uint8_t b, uint8_t value);
 
 uint8_t turboquant_unpack_dynamic(const uint8_t *buffer, size_t dim_index, uint8_t b);
 
 uint8_t turboquant_mse_quantization(turboquant_context_t *context, const vector_t *x);
 
-/* uint8_t quantized_john_lidenstrauss(const float *vec, const size_t d, 
+/* uint8_t quantized_john_lidenstrauss(const float *vec, const size_t d,
                 int8_t bit); */
 
 vector_t* turboquant_mse_dequantization(turboquant_context_t *context);
@@ -101,5 +90,9 @@ vector_t* turboquant_mse_dequantization(turboquant_context_t *context);
 uint8_t turboquant_prod_quantization(turboquant_context_t *context, vector_t *x, quantization_result *results);
 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -34,6 +34,25 @@ typedef struct {
 
 /* The linear algebra module provides an API for vector and matrix operations */
 
+/*
+ * Description: Initialize shared CUDA math handles used by linear algebra ops
+ * Return: SUCCESS on success, ERROR on failure
+ */
+int lin_alg_runtime_init(void);
+
+/*
+ * Description: Destroy shared CUDA math handles used by linear algebra ops
+ * Return: SUCCESS on success, ERROR on failure
+ */
+int lin_alg_runtime_shutdown(void);
+
+/*
+ * Description: Set CUDA stream for cuBLAS/cuSOLVER calls
+ * Input: stream_handle (cudaStream_t cast to void*)
+ * Return: SUCCESS on success, ERROR on failure
+ */
+int lin_alg_set_stream(void *stream_handle);
+
 /* 
  * Description: Create a dynamically allocated matrix initialized to zero
  * Input: m (number of rows), n (number of columns)
