@@ -31,7 +31,9 @@ int main() {
     printf("Initialization successful (Matrices generated and QR decomposed).\n");
 
     // 3. Serialize to disk
-    const char *filename = "turboquant_1536_2bit.bin";
+    char filename[255];
+    sprintf(filename, "turboquant_%d_%dbit.bin", DIMENSIONS, BIT_WIDTH);
+   
     if (turboquant_save(filename) == QUANT_SUCCESS) {
         printf("\033[32mSuccess: Context saved to '%s'\033[0m\n", filename);
         printf("You can now load this file in your PoC to bypass training.\n");
