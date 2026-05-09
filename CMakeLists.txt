@@ -27,7 +27,7 @@ if (TURBOQUANT_BUILD_CUDA)
         enable_language(CUDA)
         find_package(CUDAToolkit REQUIRED)
 
-        add_library(turboquant STATIC
+        add_library(turboquant SHARED
             src/codebook.c
             src/lin_alg.cu
             src/turboquant.cu
@@ -39,7 +39,6 @@ if (TURBOQUANT_BUILD_CUDA)
         set_target_properties(turboquant PROPERTIES
             CUDA_STANDARD 17
             CUDA_STANDARD_REQUIRED ON
-            CUDA_SEPARABLE_COMPILATION ON
             POSITION_INDEPENDENT_CODE ON
         )
         target_link_libraries(turboquant
