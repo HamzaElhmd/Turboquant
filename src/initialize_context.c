@@ -33,7 +33,7 @@ int main(void) {
 
     // 3. Serialize to disk
     char filename[64];
-    snprintf(filename, sizeof(filename), "turboquant_%d_%dbit.bin", DIMENSIONS, BIT_WIDTH - 1);
+    snprintf(filename, sizeof(filename), "turboquant_%d_%dbit.bin", DIMENSIONS, BIT_WIDTH);
 
     if (turboquant_save(context, filename) == QUANT_SUCCESS) {
         printf("\033[32mSuccess: Context saved to '%s'\033[0m\n", filename);

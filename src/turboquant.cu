@@ -680,17 +680,20 @@ __global__ void turboquant_qjl_sign_kernel(const float* y, uint32_t* d_qjl, int 
 uint8_t turboquant_prod_quantization(turboquant_context_t *context, vector_t *x, quantization_result *results) {
     if (x == NULL || context == NULL || results == NULL)
         return QUANT_NULL;
-    if (!context->is_init)
+    if (!context->is_init) {
         return QUANT_UNINITIALIZED;
+    }
 
     cudaStream_t stream = (cudaStream_t)context->compute_stream;
 
-    if (turboquant_mse_quantization(context, x) != QUANT_SUCCESS) 
+    if (turboquant_mse_quantization(context, x) != QUANT_SUCCESS){
         return QUANT_PROD_FAILED;
+    }
 
     vector_t* x_hat = turboquant_mse_dequantization(context);
-    if (x_hat == NULL)
+    if (x_hat == NULL) {
         return QUANT_PROD_FAILED;
+    }
 
     if (lin_alg_copy_vector(context->mse_buffer, x) != SUCCESS)
         return QUANT_PROD_FAILED;
@@ -789,4 +792,286 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     cudaStreamSynchronize(stream);
 
     return context->y; 
+}
+
+/* ============================================================================
+ * ASYNC/NON-BLOCKING QUANTIZATION (for multi-stream batching)
+ * ============================================================================ */
+
+/* Internal async version of MSE dequantization - does NOT sync */
+static vector_t* turboquant_mse_dequantization_async(turboquant_context_t *context) {
+    if (context->h_bstring == NULL)
+        return NULL;
+    if (!context->is_init)
+        return NULL;
+
+    cudaStream_t stream = (cudaStream_t)context->compute_stream;
+    int threads = 128;
+    int blocks = (context->mse_quantizer->dims + threads - 1) / threads;
+    
+    turboquant_dequant_kernel<<<blocks, threads, 0, stream>>>(
+        context->d_bstring,
+        context->mse_quantizer->d_centroids,
+        context->mse_quantizer->bit_width,
+        context->mse_quantizer->dims,
+        context->mse_buffer->vector
+    );
+
+    lin_alg_transpose_matrix(context->mse_quantizer->Π);
+
+    if (lin_alg_dot_productmv(context->mse_quantizer->Π, context->mse_buffer, context->y) != SUCCESS) {
+        lin_alg_transpose_matrix(context->mse_quantizer->Π);
+        return NULL;
+    }
+
+    lin_alg_transpose_matrix(context->mse_quantizer->Π);
+    // NO SYNC - let caller handle it
+
+    return context->y;
+}
+
+/* Async version of prod quantization - does NOT sync until end */
+static uint8_t turboquant_prod_quantization_async(
+    turboquant_context_t *context, 
+    vector_t *x, 
+    quantization_result *results,
+    uint8_t skip_mse_quant)  /* If true, skip MSE quant (already done) */
+{
+    if (x == NULL || context == NULL || results == NULL)
+        return QUANT_NULL;
+    if (!context->is_init)
+        return QUANT_UNINITIALIZED;
+
+    cudaStream_t stream = (cudaStream_t)context->compute_stream;
+
+    /* Step 1: MSE Quantization (unless skipped) */
+    if (!skip_mse_quant) {
+        if (turboquant_mse_quantization(context, x) != QUANT_SUCCESS){
+            return QUANT_PROD_FAILED;
+        }
+    }
+
+    /* Step 2: MSE Dequantization (async - no sync) */
+    vector_t* x_hat = turboquant_mse_dequantization_async(context);
+    if (x_hat == NULL) {
+        return QUANT_PROD_FAILED;
+    }
+
+    /* Step 3: Residual computation */
+    if (lin_alg_copy_vector(context->mse_buffer, x) != SUCCESS)
+        return QUANT_PROD_FAILED;
+
+    if (lin_alg_l2_normalize(context->mse_buffer) != MATH_OPS_SUCCESS)
+        return QUANT_PROD_FAILED; 
+
+    if (lin_alg_sub_vectors(context->mse_buffer, x_hat) != SUCCESS)
+        return QUANT_PROD_FAILED;
+
+    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->y) != SUCCESS)
+        return QUANT_PROD_FAILED;
+
+    /* Step 4: QJL Sign Packing */
+    int threads = 128;
+    int blocks = (context->mse_quantizer->dims + threads - 1) / threads;
+
+    turboquant_qjl_sign_kernel<<<blocks, threads, 0, stream>>>(
+        context->y->vector,
+        (uint32_t*)context->d_qjl,
+        context->mse_quantizer->dims
+    );
+
+    /* Link results to context's zero-copy buffers */
+    results->qjl = context->h_qjl;
+    results->bstring = context->h_bstring;
+    
+    /* Compute residual L2 on CPU side after sync */
+    results->residual_l2 = 0.0f; /* Will be computed after sync */
+
+    return QUANT_SUCCESS;
+}
+
+/* ============================================================================
+ * MULTI-STREAM BATCH PROCESSING IMPLEMENTATION
+ * ============================================================================ */
+
+uint8_t turboquant_batch_init(turboquant_batch_context_t **batch_ctx, const size_t dim, const uint8_t bit_width, const uint8_t n_streams) {
+    if (dim == 0 || bit_width == 0 || n_streams == 0)
+        return QUANT_INIT_FAILED;
+
+    *batch_ctx = (turboquant_batch_context_t*) malloc(sizeof(turboquant_batch_context_t));
+    if (*batch_ctx == NULL)
+        return QUANT_INIT_FAILED;
+
+    (*batch_ctx)->contexts = (turboquant_context_t**) malloc(n_streams * sizeof(turboquant_context_t*));
+    if ((*batch_ctx)->contexts == NULL) {
+        free(*batch_ctx);
+        *batch_ctx = NULL;
+        return QUANT_INIT_FAILED;
+    }
+
+    (*batch_ctx)->n_streams = n_streams;
+    (*batch_ctx)->dims = dim;
+    (*batch_ctx)->bit_width = bit_width;
+    (*batch_ctx)->is_init = 0;
+
+    for (uint8_t i = 0; i < n_streams; i++) {
+        (*batch_ctx)->contexts[i] = NULL;
+    }
+
+    for (uint8_t i = 0; i < n_streams; i++) {
+        uint8_t status = turboquant_init(&((*batch_ctx)->contexts[i]), dim, bit_width);
+        if (status != QUANT_SUCCESS) {
+            turboquant_batch_destroy(batch_ctx);
+            return QUANT_INIT_FAILED;
+        }
+    }
+
+    (*batch_ctx)->is_init = 1;
+    return QUANT_SUCCESS;
+}
+
+void turboquant_batch_destroy(turboquant_batch_context_t **batch_ctx) {
+    if (batch_ctx && *batch_ctx) {
+        if ((*batch_ctx)->contexts) {
+            for (uint8_t i = 0; i < (*batch_ctx)->n_streams; i++) {
+                if ((*batch_ctx)->contexts[i]) {
+                    turboquant_context_destroy(&((*batch_ctx)->contexts[i]));
+                }
+            }
+            free((*batch_ctx)->contexts);
+        }
+        free(*batch_ctx);
+        *batch_ctx = NULL;
+    }
+}
+
+uint8_t turboquant_batch_init_load(turboquant_batch_context_t *batch_ctx, const char *filename) {
+    if (batch_ctx == NULL || filename == NULL)
+        return QUANT_INIT_FAILED;
+    if (!batch_ctx->is_init || batch_ctx->contexts == NULL)
+        return QUANT_UNINITIALIZED;
+
+    for (uint8_t i = 0; i < batch_ctx->n_streams; i++) {
+        uint8_t status = turboquant_init_load(batch_ctx->contexts[i], filename);
+        if (status != QUANT_SUCCESS) {
+            return QUANT_INIT_FAILED;
+        }
+    }
+
+    return QUANT_SUCCESS;
+}
+
+uint8_t turboquant_batch_save(turboquant_batch_context_t *batch_ctx, const char *filename) {
+    if (batch_ctx == NULL || filename == NULL)
+        return QUANT_INIT_FAILED;
+    if (!batch_ctx->is_init || batch_ctx->contexts == NULL || batch_ctx->n_streams == 0)
+        return QUANT_UNINITIALIZED;
+
+    return turboquant_save(batch_ctx->contexts[0], filename);
+}
+
+uint8_t turboquant_prod_quantization_batch(
+    turboquant_batch_context_t *batch_ctx, 
+    vector_t **x_array, 
+    quantization_batch_result *batch_results, 
+    const uint8_t batch_size) 
+{
+    if (batch_ctx == NULL || x_array == NULL || batch_results == NULL)
+        return QUANT_NULL;
+    if (!batch_ctx->is_init || batch_ctx->contexts == NULL)
+        return QUANT_UNINITIALIZED;
+    if (batch_size == 0)
+        return QUANT_SUCCESS;
+
+    uint8_t n_streams = batch_ctx->n_streams;
+
+    batch_results->results = (quantization_result*) malloc(batch_size * sizeof(quantization_result));
+    if (batch_results->results == NULL)
+        return QUANT_INIT_FAILED;
+    batch_results->n_results = batch_size;
+
+    for (uint8_t i = 0; i < batch_size; i++) {
+        batch_results->results[i].bstring = NULL;
+        batch_results->results[i].qjl = NULL;
+        batch_results->results[i].residual_l2 = 0.0f;
+    }
+
+    /* Phase 1: Launch all quantizations asynchronously across streams (NO SYNC) */
+    for (uint8_t i = 0; i < batch_size; i++) {
+        uint8_t stream_idx = i % n_streams;
+        turboquant_context_t *ctx = batch_ctx->contexts[stream_idx];
+
+        /* Use async version that doesn't sync internally */
+        if (turboquant_prod_quantization_async(ctx, x_array[i], &(batch_results->results[i]), 0) != QUANT_SUCCESS) {
+            for (uint8_t j = 0; j < batch_size; j++) {
+                batch_results->results[j].bstring = NULL;
+                batch_results->results[j].qjl = NULL;
+            }
+            free(batch_results->results);
+            batch_results->results = NULL;
+            batch_results->n_results = 0;
+            return QUANT_PROD_FAILED;
+        }
+    }
+
+    /* Phase 2: Sync all streams ONCE after all kernels are launched */
+    for (uint8_t i = 0; i < n_streams && i < batch_size; i++) {
+        cudaStreamSynchronize((cudaStream_t)batch_ctx->contexts[i]->compute_stream);
+    }
+
+    /* Phase 3: Copy results from pinned memory */
+    for (uint8_t i = 0; i < batch_size; i++) {
+        uint8_t stream_idx = i % n_streams;
+        turboquant_context_t *ctx = batch_ctx->contexts[stream_idx];
+        
+        batch_results->results[i].bstring = ctx->h_bstring;
+        batch_results->results[i].qjl = ctx->h_qjl;
+        /* residual_l2 is not computed in async version - could add if needed */
+    }
+
+    return QUANT_SUCCESS;
+}
+
+vector_t** turboquant_prod_dequantization_batch(
+    turboquant_batch_context_t *batch_ctx, 
+    const quantization_batch_result *batch_results) 
+{
+    if (batch_ctx == NULL || batch_results == NULL)
+        return NULL;
+    if (!batch_ctx->is_init || batch_ctx->contexts == NULL)
+        return NULL;
+    if (batch_results->n_results == 0 || batch_results->results == NULL)
+        return NULL;
+
+    uint8_t batch_size = batch_results->n_results;
+    uint8_t n_streams = batch_ctx->n_streams;
+
+    vector_t **results = (vector_t**) malloc((batch_size + 1) * sizeof(vector_t*));
+    if (results == NULL)
+        return NULL;
+
+    for (uint8_t i = 0; i < batch_size; i++) {
+        uint8_t stream_idx = i % n_streams;
+        turboquant_context_t *ctx = batch_ctx->contexts[stream_idx];
+
+        if (ctx->h_bstring != batch_results->results[i].bstring) {
+            memcpy(ctx->h_bstring, batch_results->results[i].bstring, ctx->bstring_size);
+        }
+        if (ctx->h_qjl != batch_results->results[i].qjl) {
+            memcpy(ctx->h_qjl, batch_results->results[i].qjl, ctx->qjl_size);
+        }
+
+        results[i] = turboquant_prod_dequantization(ctx, &(batch_results->results[i]));
+        if (results[i] == NULL) {
+            free(results);
+            return NULL;
+        }
+    }
+
+    for (uint8_t i = 0; i < n_streams && i < batch_size; i++) {
+        cudaStreamSynchronize((cudaStream_t)batch_ctx->contexts[i]->compute_stream);
+    }
+
+    results[batch_size] = NULL;
+    return results;
 }

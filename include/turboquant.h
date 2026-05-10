@@ -31,27 +31,42 @@ typedef struct {
 } turbo_quantizer;
 
 typedef struct {
-        uint8_t *bstring;
-        uint8_t *qjl;
-        float residual_l2;
+	uint8_t *bstring;
+	uint8_t *qjl;
+	float residual_l2;
 } quantization_result;
 
 typedef struct {
-        turbo_quantizer *mse_quantizer;
-        vector_t *mse_buffer;
-        vector_t *y;
+	turbo_quantizer *mse_quantizer;
+	vector_t *mse_buffer;
+	vector_t *y;
 
-        uint8_t *h_bstring;
-        uint8_t *d_bstring;
-        size_t bstring_size;
+	uint8_t *h_bstring;
+	uint8_t *d_bstring;
+	size_t bstring_size;
 
-        uint8_t *h_qjl;
-        uint8_t *d_qjl;
-        size_t qjl_size;
+	uint8_t *h_qjl;
+	uint8_t *d_qjl;
+	size_t qjl_size;
 
-        void *compute_stream;
-        uint8_t is_init;
+	void *compute_stream;
+	uint8_t is_init;
 } turboquant_context_t;
+
+/* Multi-stream batch processing context */
+typedef struct {
+	turboquant_context_t **contexts;
+	uint8_t n_streams;
+	size_t dims;
+	uint8_t bit_width;
+	uint8_t is_init;
+} turboquant_batch_context_t;
+
+/* Batch result for multiple vectors */
+typedef struct {
+	quantization_result *results;
+	uint8_t n_results;
+} quantization_batch_result;
 
 uint8_t turboquant_init(turboquant_context_t **context, const size_t dim, const uint8_t bit_width);
 
@@ -90,6 +105,15 @@ vector_t* turboquant_mse_dequantization(turboquant_context_t *context);
 uint8_t turboquant_prod_quantization(turboquant_context_t *context, vector_t *x, quantization_result *results);
 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res);
+
+/* Multi-stream batch processing functions */
+uint8_t turboquant_batch_init(turboquant_batch_context_t **batch_ctx, const size_t dim, const uint8_t bit_width, const uint8_t n_streams);
+void turboquant_batch_destroy(turboquant_batch_context_t **batch_ctx);
+uint8_t turboquant_batch_init_load(turboquant_batch_context_t *batch_ctx, const char *filename);
+uint8_t turboquant_batch_save(turboquant_batch_context_t *batch_ctx, const char *filename);
+
+uint8_t turboquant_prod_quantization_batch(turboquant_batch_context_t *batch_ctx, vector_t **x_array, quantization_batch_result *batch_results, const uint8_t batch_size);
+vector_t** turboquant_prod_dequantization_batch(turboquant_batch_context_t *batch_ctx, const quantization_batch_result *batch_results);
 
 #ifdef __cplusplus
 }
