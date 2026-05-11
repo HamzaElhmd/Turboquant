@@ -843,6 +843,8 @@ static uint8_t turboquant_prod_quantization_async(
         return QUANT_UNINITIALIZED;
 
     cudaStream_t stream = (cudaStream_t)context->compute_stream;
+    if (lin_alg_set_stream(context->compute_stream) != SUCCESS)
+        return QUANT_PROD_FAILED;
 
     /* Step 1: MSE Quantization (unless skipped) */
     if (!skip_mse_quant) {
@@ -866,6 +868,9 @@ static uint8_t turboquant_prod_quantization_async(
 
     if (lin_alg_sub_vectors(context->mse_buffer, x_hat) != SUCCESS)
         return QUANT_PROD_FAILED;
+    float residual_l2 = lin_alg_l2(context->mse_buffer);
+    if (residual_l2 < 0.0f)
+        return QUANT_PROD_FAILED;
 
     if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->y) != SUCCESS)
         return QUANT_PROD_FAILED;
@@ -883,9 +888,7 @@ static uint8_t turboquant_prod_quantization_async(
     /* Link results to context's zero-copy buffers */
     results->qjl = context->h_qjl;
     results->bstring = context->h_bstring;
-    
-    /* Compute residual L2 on CPU side after sync */
-    results->residual_l2 = 0.0f; /* Will be computed after sync */
+    results->residual_l2 = residual_l2;
 
     return QUANT_SUCCESS;
 }
@@ -1026,7 +1029,6 @@ uint8_t turboquant_prod_quantization_batch(
         
         batch_results->results[i].bstring = ctx->h_bstring;
         batch_results->results[i].qjl = ctx->h_qjl;
-        /* residual_l2 is not computed in async version - could add if needed */
     }
 
     return QUANT_SUCCESS;
