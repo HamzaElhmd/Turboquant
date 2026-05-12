@@ -57,3 +57,5 @@ dkms.conf
 tests/
 build/
 bin/
+
+SIMT-MULTI.md
