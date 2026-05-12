@@ -191,9 +191,9 @@ Output:
 
 | Metric | CUDA (T4, 8 streams) | AVX2 (Ice Lake, 1 core) | AVX2 (8 cores) |
 |--------|---------------------|------------------------|----------------|
-| Single block latency | ~50μs (kernel + sync) | ~5μs (function call) | — |
-| Python→C overhead | ~100μs per call | ~1μs per call | — |
-| Ideal throughput | 15K-25K blk/s | 50K-100K blk/s | 400K-800K blk/s |
+| Single block latency | ~50μs (kernel + sync) | ~5μs (function call) | ~5μs (batch per item) |
+| Python→C overhead | ~100μs per call | ~1μs per call | ~1μs per call |
+| Ideal throughput | 15K-25K blk/s | ~378 vec/s (1536D) | ~1070 vec/s (8 threads) |
 | Memory bandwidth | 300 GB/s (GDDR6) | 50 GB/s (DDR4) | 200 GB/s (DDR5) |
 | Batch sweet spot | 512-1024 blocks | 1-64 blocks | 64-256 blocks |
 
@@ -236,24 +236,37 @@ For 128D float32 (512 bytes):
 
 ---
 
-## Multi-Core Parallelism (OpenMP / TBB)
+## Multi-Core Parallelism (OpenMP Batch API)
 
-The current implementation is single-threaded. For maximum throughput, wrap the library in an OpenMP parallel loop:
+The library now includes a native multi-threaded batch API with per-thread scratch buffers.
+Internally it uses `#pragma omp parallel for num_threads(n_threads)` where `n_threads` is
+given at batch context creation. Each thread gets its own `turboquant_thread_ctx_t`
+holding isolated aligned buffers (y, x_cpy, residual, result, x_hat, x_mse, qj1_floats, x_qj1)
+so there is no false sharing.
 
-```c
-#pragma omp parallel for
-for (size_t i = 0; i < batch_size; i++) {
-    turboquant_prod_quantization(x[i], &results[i]);
-}
-```
+### API Overview
 
-Each thread should have its own `turbo_quantizer` context to avoid false sharing.
+| Function | Purpose |
+|----------|---------|
+| `turboquant_batch_init(&ctx, dims, bit_width, n_threads)` | Create batch context + per-thread scratch |
+| `turboquant_batch_quantize(ctx, x_array, results, batch_size)` | Parallel quantize |
+| `turboquant_batch_dequantize(ctx, results, batch_size)` | Parallel dequantize |
+| `turboquant_batch_save(ctx, filename)` | Serialize quantizer state |
+| `turboquant_batch_init_load(ctx, filename)` | Load state into existing context |
+| `turboquant_batch_destroy(&ctx)` | Free context + scratch buffers |
+| `turboquant_batch_results_destroy(&vec_array)` | Free `vector_t**` from dequantize |
+
+### Thread Safety Rules
+
+1. **Each `turboquant_batch_ctx_t` is thread-safe for concurrent batch calls** — each thread writes only to its own scratch buffers.
+2. **The shared `turbo_quantizer` inside the context is read-only during batch calls** — it must not be mutated while a batch is in flight.
+3. **Single-threaded API remains safe** — `turboquant_prod_quantization` / `turboquant_prod_dequantization` use the global `mse_quantizer` and are not callable safely from multiple threads simultaneously.
 
 ---
 
 ## Usage
 
-### Basic quantization
+### Basic quantization (single-threaded)
 
 ```c
 #include <turboquant.h>
@@ -287,23 +300,54 @@ turboquant_init_load("turboquant_1536_3bit.bin");
 // ... use without re-initializing matrices ...
 ```
 
+### Batch quantization (multi-threaded)
+
+```c
+#include <stdlib.h>
+#include <turboquant.h>
+
+const size_t n = 512;
+const size_t nt = 4;
+turboquant_batch_ctx_t *ctx = NULL;
+
+// Create context with per-thread scratch
+turboquant_batch_init(&ctx, 1536, 2, nt);
+
+// Pre-allocate results array
+quantization_result *results = calloc(n, sizeof(quantization_result));
+
+// Parallel batch quantize
+turboquant_batch_quantize(ctx, x_array, results, n);
+
+// Parallel batch dequantize
+vector_t **recon = turboquant_batch_dequantize(ctx, results, n);
+
+// Cleanup
+turboquant_batch_results_destroy(&recon);
+for (size_t i = 0; i < n; i++) {
+    free(results[i].bstring);
+    free(results[i].qjl);
+}
+free(results);
+turboquant_batch_destroy(&ctx);
+```
+
 ---
 
 ## Limitations and Future Work
 
 ### Current Limitations
 
-1. **No multi-threading in library**: Single-core AVX2 only. Caller must parallelize.
+1. **OpenMP only**: Multi-threading is OpenMP-based; no native pthread or TBB backend.
 2. **Transpose scatter**: Falls back to scalar stores. AVX-512 would help.
 3. **No dynamic dispatch**: `-march=native` means binary may not run on older CPUs.
 4. **SVML dependency**: Requires Intel compiler/runtime for vector math.
 
 ### Future Optimizations
 
-1. **OpenMP threading inside library**: Batch processing with per-thread contexts
-2. **AVX-512 (512-bit)**: 16 floats per instruction, native scatter/gather
-3. **AMX (Advanced Matrix Extensions)**: Tile-based matrix multiply on Sapphire Rapids+
-4. **VNNI**: 8-bit integer dot products for quantized inference
+1. **AVX-512 (512-bit)**: 16 floats per instruction, native scatter/gather
+2. **AMX (Advanced Matrix Extensions)**: Tile-based matrix multiply on Sapphire Rapids+
+3. **VNNI**: 8-bit integer dot products for quantized inference
 
 ---
 

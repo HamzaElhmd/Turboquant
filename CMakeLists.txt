@@ -2,12 +2,16 @@ cmake_minimum_required(VERSION 3.20)
 
 project(TurboQuantQuantization C CXX)
 
-# ── 1. Force Intel icx compiler ───────────────────────────────────────────────
-# Set before any find_package or enable_language calls.
-# You can also pass these at configure time:
-#   cmake -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx ..
-set(CMAKE_C_COMPILER    icx)
-set(CMAKE_CXX_COMPILER  icpx)
+# ── 1. Compiler settings ──────────────────────────────────────────────────────
+# Use Intel icx if available, otherwise system default (gcc/clang).
+# Override at configure time: cmake -DCMAKE_C_COMPILER=icx ..
+find_program(ICX_PATH icx)
+if(ICX_PATH)
+    set(CMAKE_C_COMPILER    icx)
+    set(CMAKE_CXX_COMPILER  icpx)
+else()
+    message(STATUS "Intel icx not found; using system default compiler.")
+endif()
 
 set(CMAKE_C_STANDARD    11)
 set(CMAKE_CXX_STANDARD  17)
@@ -52,10 +56,36 @@ target_link_libraries(turboquant PRIVATE
     # irc                                        # Intel runtime
 )
 
-# ── 7. Output goes to build/ (mirrors your -o build/...) ─────────────────────
+# ── 7. Find OpenMP for multi-threaded batch API ────────────────────────────
+find_package(OpenMP)
+if(OpenMP_C_FOUND)
+    target_compile_options(turboquant PRIVATE ${OpenMP_C_FLAGS})
+    target_link_libraries(turboquant PRIVATE OpenMP::OpenMP_C)
+else()
+    message(WARNING "OpenMP not found: multi-threaded batch API will not build.")
+endif()
+
+# ── 8. Output goes to build/ (mirrors your -o build/...) ─────────────────────
 set_target_properties(turboquant PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build
     OUTPUT_NAME              turboquant        # → libturboquant.so
     POSITION_INDEPENDENT_CODE ON              # mandatory for shared libs
 )
+
+# ── 9. Test executables ──────────────────────────────────────────────────────
+# Test executables (both need OpenMP because libturboquant.so links it)
+add_executable(test_turboquant tests/suits/test_turboquant.c)
+target_link_libraries(test_turboquant PRIVATE turboquant)
+target_include_directories(test_turboquant PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+add_executable(test_turboquant_mt tests/suits/test_turboquant_mt.c)
+target_link_libraries(test_turboquant_mt PRIVATE turboquant)
+target_include_directories(test_turboquant_mt PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+if(OpenMP_C_FOUND)
+    target_compile_options(test_turboquant PRIVATE ${OpenMP_C_FLAGS})
+    target_link_libraries(test_turboquant PRIVATE OpenMP::OpenMP_C)
+    target_compile_options(test_turboquant_mt PRIVATE ${OpenMP_C_FLAGS})
+    target_link_libraries(test_turboquant_mt PRIVATE OpenMP::OpenMP_C)
+endif()
 

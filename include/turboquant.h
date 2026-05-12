@@ -75,4 +75,57 @@ uint8_t turboquant_prod_quantization(vector_t *x, quantization_result *results);
 vector_t* turboquant_prod_dequantization(const quantization_result *res);
 
 
+/* ==========================================================================
+ * Multi-threaded batch processing API
+ * ========================================================================== */
+
+typedef struct {
+    vector_t *y;                /* rotated vector */
+    vector_t *x_cpy;          /* L2-normalized copy of input */
+    vector_t *residual;       /* residual buffer */
+    vector_t *result;         /* S * residual */
+    vector_t *x_hat;          /* MSE reconstruction */
+    vector_t *x_mse;          /* MSE component for dequant */
+    vector_t *qj1_floats;     /* sign-expanded residual */
+    vector_t *x_qj1;          /* scaled residual component */
+    uint8_t   _pad[24];       /* padding to 64-byte cache line */
+} turboquant_thread_ctx_t;
+
+typedef struct {
+    turbo_quantizer *quantizer;       /* shared read-only quantizer */
+    turboquant_thread_ctx_t **threads;/* per-thread scratch buffers */
+    size_t             n_threads;      /* number of threads allocated */
+    size_t             dims;           /* vector dimension */
+    uint8_t            bit_width;      /* MSE bit width */
+    uint8_t            is_init;        /* initialization flag */
+} turboquant_batch_ctx_t;
+
+/* Batch context lifecycle */
+uint8_t turboquant_batch_init(turboquant_batch_ctx_t **ctx,
+                              const size_t dims,
+                              const uint8_t bit_width,
+                              const size_t n_threads);
+
+void turboquant_batch_destroy(turboquant_batch_ctx_t **ctx);
+
+uint8_t turboquant_batch_init_load(turboquant_batch_ctx_t *ctx,
+                                   const char *filename);
+
+uint8_t turboquant_batch_save(turboquant_batch_ctx_t *ctx,
+                              const char *filename);
+
+/* Batch processing: quantize 'batch_size' vectors in parallel */
+uint8_t turboquant_batch_quantize(turboquant_batch_ctx_t *ctx,
+                                  vector_t **x_array,
+                                  quantization_result *results,
+                                  const size_t batch_size);
+
+/* Batch processing: dequantize 'batch_size' results in parallel */
+vector_t** turboquant_batch_dequantize(turboquant_batch_ctx_t *ctx,
+                                       const quantization_result *results,
+                                       const size_t batch_size);
+
+/* Destroy a NULL-terminated vector_t** array returned by batch_dequantize */
+void turboquant_batch_results_destroy(vector_t ***results);
+
 #endif

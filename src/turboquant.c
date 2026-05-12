@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <omp.h>
 
 turbo_quantizer *mse_quantizer = NULL;
 uint8_t is_init = 0;
@@ -572,4 +573,356 @@ vector_t* turboquant_prod_dequantization(const quantization_result *res) {
     lin_alg_free_vector(&x_qj1);
 
     return x_mse; 
+}
+
+/* ==========================================================================
+ * Internal helpers for batch processing (use pre-allocated thread buffers)
+ * ========================================================================== */
+
+static uint8_t mse_quantization_ctx(turbo_quantizer *q, const vector_t *x,
+                                    uint8_t *bstring,
+                                    vector_t *y, vector_t *x_cpy) {
+    if (x == NULL || bstring == NULL || q == NULL)
+        return QUANT_NULL;
+
+    if (lin_alg_copy_vector(x_cpy, x) != SUCCESS)
+        return QUANT_MSE_FAILED;
+
+    if (lin_alg_l2_normalize(x_cpy) != MATH_OPS_SUCCESS)
+        return QUANT_MSE_FAILED;
+
+    if (lin_alg_dot_productmv(q->Π, x_cpy, y) != SUCCESS)
+        return QUANT_MSE_FAILED;
+
+    float current, min;
+    size_t idx;
+    for (int i = 0; i < (int)q->dims; i++) {
+        min = fabsf(y->vector[i] - q->book->centroids[0].value);
+        idx = 0;
+        for (int k = 1; k < (int)q->book->n_centroids; k++) {
+            current = fabsf(y->vector[i] - q->book->centroids[k].value);
+            if (current < min) { min = current; idx = k; }
+        }
+        pack_dynamic(bstring, i, q->bit_width, (uint8_t)idx);
+    }
+    return QUANT_SUCCESS;
+}
+
+static vector_t* mse_dequantization_ctx(turbo_quantizer *q, const uint8_t *bstring,
+                                        vector_t *y_hat, vector_t *x_hat) {
+    if (bstring == NULL || q == NULL) return NULL;
+
+    for (int i = 0; i < (int)q->dims; i++) {
+        uint8_t idx = unpack_dynamic(bstring, i, q->bit_width);
+        y_hat->vector[i] = q->book->centroids[idx].value;
+    }
+
+    if (lin_alg_dot_productmv(q->t_Π, y_hat, x_hat) != SUCCESS)
+        return NULL;
+
+    return x_hat;
+}
+
+static uint8_t prod_quantization_ctx(turbo_quantizer *q, vector_t *x,
+                                     quantization_result *res,
+                                     turboquant_thread_ctx_t *tc) {
+    if (x == NULL || res == NULL || q == NULL || tc == NULL)
+        return QUANT_NULL;
+
+    size_t total_bytes = ((q->bit_width * q->dims) + 7) / 8;
+    uint8_t *bstring = (uint8_t*) calloc(1, total_bytes);
+    if (bstring == NULL) return QUANT_PROD_FAILED;
+
+    if (mse_quantization_ctx(q, x, bstring, tc->y, tc->x_cpy) != QUANT_SUCCESS) {
+        free(bstring); return QUANT_PROD_FAILED;
+    }
+
+    vector_t *x_hat = mse_dequantization_ctx(q, bstring, tc->y, tc->x_hat);
+    if (x_hat == NULL) { free(bstring); return QUANT_PROD_FAILED; }
+
+    if (lin_alg_copy_vector(tc->residual, x) != SUCCESS) {
+        free(bstring); return QUANT_PROD_FAILED;
+    }
+    if (lin_alg_l2_normalize(tc->residual) != MATH_OPS_SUCCESS) {
+        free(bstring); return QUANT_PROD_FAILED;
+    }
+    if (lin_alg_sub_vectors(tc->residual, x_hat) != SUCCESS) {
+        free(bstring); return QUANT_PROD_FAILED;
+    }
+    if (lin_alg_dot_productmv(q->S, tc->residual, tc->result) != SUCCESS) {
+        free(bstring); return QUANT_PROD_FAILED;
+    }
+
+    size_t qjl_bytes = (q->dims + 7) / 8;
+    uint8_t *qjl_packed = (uint8_t*) calloc(1, qjl_bytes);
+    if (qjl_packed == NULL) { free(bstring); return QUANT_PROD_FAILED; }
+
+    for (int i = 0; i < (int)q->dims; i++) {
+        uint8_t sign = (tc->result->vector[i] < 0.0f) ? 1 : 0;
+        pack_dynamic(qjl_packed, i, 1, sign);
+    }
+
+    res->bstring = bstring;
+    res->qjl = qjl_packed;
+    res->residual_l2 = lin_alg_l2(tc->residual);
+    return QUANT_SUCCESS;
+}
+
+static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
+                                          const quantization_result *res,
+                                          turboquant_thread_ctx_t *tc) {
+    if (res == NULL || q == NULL || tc == NULL) return NULL;
+
+    vector_t *x_mse = mse_dequantization_ctx(q, res->bstring, tc->y, tc->x_mse);
+    if (x_mse == NULL) return NULL;
+
+    for (size_t i = 0; i < q->dims; i++) {
+        uint8_t sign = unpack_dynamic(res->qjl, i, 1);
+        tc->qj1_floats->vector[i] = (sign == 1) ? -1.0f : 1.0f;
+    }
+
+    if (lin_alg_dot_productmv(q->t_S, tc->qj1_floats, tc->x_qj1) != SUCCESS)
+        return NULL;
+
+    float scale = (sqrtf(PI / 2.0f) / (float)q->dims) * res->residual_l2;
+    if (lin_alg_scale_vector(tc->x_qj1, scale) != SUCCESS)
+        return NULL;
+
+    if (lin_alg_add_vectors(x_mse, tc->x_qj1) != SUCCESS)
+        return NULL;
+
+    return x_mse;
+}
+
+/* ==========================================================================
+ * Batch context lifecycle
+ * ========================================================================== */
+
+uint8_t turboquant_batch_init(turboquant_batch_ctx_t **ctx,
+                              const size_t dims,
+                              const uint8_t bit_width,
+                              const size_t n_threads) {
+    if (dims == 0 || bit_width == 0 || n_threads == 0)
+        return QUANT_INIT_FAILED;
+
+    *ctx = (turboquant_batch_ctx_t*) calloc(1, sizeof(turboquant_batch_ctx_t));
+    if (*ctx == NULL) return QUANT_INIT_FAILED;
+
+    (*ctx)->quantizer = turboquant_quantizer_init(dims, bit_width);
+    if ((*ctx)->quantizer == NULL) {
+        free(*ctx); *ctx = NULL;
+        return QUANT_INIT_FAILED;
+    }
+
+    (*ctx)->threads = (turboquant_thread_ctx_t**)
+        calloc(n_threads, sizeof(turboquant_thread_ctx_t*));
+    if ((*ctx)->threads == NULL) {
+        turboquant_quantizer_destroy(&(*ctx)->quantizer);
+        free(*ctx); *ctx = NULL;
+        return QUANT_INIT_FAILED;
+    }
+
+    for (size_t t = 0; t < n_threads; t++) {
+        turboquant_thread_ctx_t *tc =
+            (turboquant_thread_ctx_t*) calloc(1, sizeof(turboquant_thread_ctx_t));
+        if (tc == NULL) goto cleanup;
+
+        tc->y          = lin_alg_create_vector(dims);
+        tc->x_cpy      = lin_alg_create_vector(dims);
+        tc->residual   = lin_alg_create_vector(dims);
+        tc->result     = lin_alg_create_vector(dims);
+        tc->x_hat      = lin_alg_create_vector(dims);
+        tc->x_mse      = lin_alg_create_vector(dims);
+        tc->qj1_floats = lin_alg_create_vector(dims);
+        tc->x_qj1      = lin_alg_create_vector(dims);
+
+        if (!tc->y || !tc->x_cpy || !tc->residual || !tc->result ||
+            !tc->x_hat || !tc->x_mse || !tc->qj1_floats || !tc->x_qj1) {
+            /* partial free handled in cleanup */
+            goto cleanup;
+        }
+        (*ctx)->threads[t] = tc;
+    }
+
+    (*ctx)->n_threads = n_threads;
+    (*ctx)->dims = dims;
+    (*ctx)->bit_width = bit_width;
+    (*ctx)->is_init = 1;
+    return QUANT_SUCCESS;
+
+cleanup:
+    for (size_t t = 0; t < n_threads; t++) {
+        turboquant_thread_ctx_t *tc = (*ctx)->threads[t];
+        if (tc) {
+            lin_alg_free_vector(&tc->y);
+            lin_alg_free_vector(&tc->x_cpy);
+            lin_alg_free_vector(&tc->residual);
+            lin_alg_free_vector(&tc->result);
+            lin_alg_free_vector(&tc->x_hat);
+            lin_alg_free_vector(&tc->x_mse);
+            lin_alg_free_vector(&tc->qj1_floats);
+            lin_alg_free_vector(&tc->x_qj1);
+            free(tc);
+        }
+    }
+    free((*ctx)->threads);
+    turboquant_quantizer_destroy(&(*ctx)->quantizer);
+    free(*ctx); *ctx = NULL;
+    return QUANT_INIT_FAILED;
+}
+
+void turboquant_batch_destroy(turboquant_batch_ctx_t **ctx) {
+    if (ctx == NULL || *ctx == NULL) return;
+
+    if ((*ctx)->threads) {
+        for (size_t t = 0; t < (*ctx)->n_threads; t++) {
+            turboquant_thread_ctx_t *tc = (*ctx)->threads[t];
+            if (tc) {
+                lin_alg_free_vector(&tc->y);
+                lin_alg_free_vector(&tc->x_cpy);
+                lin_alg_free_vector(&tc->residual);
+                lin_alg_free_vector(&tc->result);
+                lin_alg_free_vector(&tc->x_hat);
+                lin_alg_free_vector(&tc->x_mse);
+                lin_alg_free_vector(&tc->qj1_floats);
+                lin_alg_free_vector(&tc->x_qj1);
+                free(tc);
+            }
+        }
+        free((*ctx)->threads);
+    }
+    turboquant_quantizer_destroy(&(*ctx)->quantizer);
+    free(*ctx);
+    *ctx = NULL;
+}
+
+uint8_t turboquant_batch_init_load(turboquant_batch_ctx_t *ctx, const char *filename) {
+    if (ctx == NULL || filename == NULL) return QUANT_INIT_FAILED;
+    if (!ctx->is_init || ctx->quantizer == NULL) return QUANT_UNINITIALIZED;
+
+    FILE *f = fopen(filename, "rb");
+    if (!f) return QUANT_INIT_FAILED;
+
+    size_t dims;
+    uint8_t bit_width;
+    if (fread(&dims, sizeof(size_t), 1, f) != 1) { fclose(f); return QUANT_INIT_FAILED; }
+    if (fread(&bit_width, sizeof(uint8_t), 1, f) != 1) { fclose(f); return QUANT_INIT_FAILED; }
+
+    if (dims != ctx->dims || bit_width != ctx->bit_width) {
+        fclose(f); return QUANT_INIT_FAILED;
+    }
+
+    /* Read codebook */
+    if (ctx->quantizer->book) codebook_destroy(&ctx->quantizer->book);
+    ctx->quantizer->book = (codebook*) malloc(sizeof(codebook));
+    if (!ctx->quantizer->book) { fclose(f); return QUANT_INIT_FAILED; }
+
+    fread(&ctx->quantizer->book->n_centroids, sizeof(size_t), 1, f);
+    uint16_t n = (uint16_t)ctx->quantizer->book->n_centroids;
+    ctx->quantizer->book->centroids = (centroid*) malloc(sizeof(centroid) * n);
+    fread(ctx->quantizer->book->centroids, sizeof(centroid), n, f);
+
+    /* Read matrices */
+    for (size_t i = 0; i < dims; i++) {
+        fread(&ctx->quantizer->Π->matrix[i * ctx->quantizer->Π->stride], sizeof(float), dims, f);
+        fread(&ctx->quantizer->t_Π->matrix[i * ctx->quantizer->t_Π->stride], sizeof(float), dims, f);
+        fread(&ctx->quantizer->S->matrix[i * ctx->quantizer->S->stride], sizeof(float), dims, f);
+        fread(&ctx->quantizer->t_S->matrix[i * ctx->quantizer->t_S->stride], sizeof(float), dims, f);
+    }
+    fclose(f);
+    return QUANT_SUCCESS;
+}
+
+uint8_t turboquant_batch_save(turboquant_batch_ctx_t *ctx, const char *filename) {
+    if (ctx == NULL || filename == NULL) return QUANT_INIT_FAILED;
+    if (!ctx->is_init || ctx->quantizer == NULL) return QUANT_UNINITIALIZED;
+
+    FILE *f = fopen(filename, "wb");
+    if (!f) return QUANT_PROD_FAILED;
+
+    fwrite(&ctx->quantizer->dims, sizeof(size_t), 1, f);
+    fwrite(&ctx->quantizer->bit_width, sizeof(uint8_t), 1, f);
+    fwrite(&ctx->quantizer->book->n_centroids, sizeof(size_t), 1, f);
+    fwrite(ctx->quantizer->book->centroids, sizeof(centroid), ctx->quantizer->book->n_centroids, f);
+
+    for (size_t i = 0; i < ctx->quantizer->dims; i++) {
+        fwrite(&ctx->quantizer->Π->matrix[i * ctx->quantizer->Π->stride], sizeof(float), ctx->quantizer->dims, f);
+        fwrite(&ctx->quantizer->t_Π->matrix[i * ctx->quantizer->t_Π->stride], sizeof(float), ctx->quantizer->dims, f);
+        fwrite(&ctx->quantizer->S->matrix[i * ctx->quantizer->S->stride], sizeof(float), ctx->quantizer->dims, f);
+        fwrite(&ctx->quantizer->t_S->matrix[i * ctx->quantizer->t_S->stride], sizeof(float), ctx->quantizer->dims, f);
+    }
+    fclose(f);
+    return QUANT_SUCCESS;
+}
+
+/* ==========================================================================
+ * Batch processing with OpenMP
+ * ========================================================================== */
+
+uint8_t turboquant_batch_quantize(turboquant_batch_ctx_t *ctx,
+                                  vector_t **x_array,
+                                  quantization_result *results,
+                                  const size_t batch_size) {
+    if (ctx == NULL || x_array == NULL || results == NULL)
+        return QUANT_NULL;
+    if (!ctx->is_init || ctx->quantizer == NULL)
+        return QUANT_UNINITIALIZED;
+    if (batch_size == 0)
+        return QUANT_SUCCESS;
+
+    #pragma omp parallel for schedule(static) num_threads((int)ctx->n_threads)
+    for (size_t i = 0; i < batch_size; i++) {
+        int tid = omp_get_thread_num();
+        turboquant_thread_ctx_t *tc = ctx->threads[tid];
+
+        uint8_t status = prod_quantization_ctx(ctx->quantizer, x_array[i],
+                                               &results[i], tc);
+        if (status != QUANT_SUCCESS) {
+            /* On error, mark result as empty; caller must check */
+            results[i].bstring = NULL;
+            results[i].qjl = NULL;
+            results[i].residual_l2 = 0.0f;
+        }
+    }
+    return QUANT_SUCCESS;
+}
+
+vector_t** turboquant_batch_dequantize(turboquant_batch_ctx_t *ctx,
+                                       const quantization_result *results,
+                                       const size_t batch_size) {
+    if (ctx == NULL || results == NULL || batch_size == 0)
+        return NULL;
+    if (!ctx->is_init || ctx->quantizer == NULL)
+        return NULL;
+
+    vector_t **out = (vector_t**) malloc((batch_size + 1) * sizeof(vector_t*));
+    if (out == NULL) return NULL;
+
+    #pragma omp parallel for schedule(static) num_threads((int)ctx->n_threads)
+    for (size_t i = 0; i < batch_size; i++) {
+        int tid = omp_get_thread_num();
+        turboquant_thread_ctx_t *tc = ctx->threads[tid];
+
+        vector_t *tmp = prod_dequantization_ctx(ctx->quantizer, &results[i], tc);
+        if (tmp) {
+            out[i] = lin_alg_create_vector(ctx->quantizer->dims);
+            if (out[i]) {
+                lin_alg_copy_vector(out[i], tmp);
+            }
+        } else {
+            out[i] = NULL;
+        }
+    }
+    out[batch_size] = NULL;
+    return out;
+}
+
+void turboquant_batch_results_destroy(vector_t ***results) {
+    if (results == NULL || *results == NULL) return;
+    vector_t **r = *results;
+    for (size_t i = 0; r[i] != NULL; i++) {
+        lin_alg_free_vector(&r[i]);
+    }
+    free(r);
+    *results = NULL;
 }

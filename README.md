@@ -9,6 +9,7 @@ For detailed implementation documentation, see [SIMD-AVX.md](SIMD-AVX.md).
 - AVX2 linear algebra backend (aligned memory, 256-bit vectorized ops)
 - Codebook generation via Lloyd-Max over a scaled Beta distribution
 - MSE quantization/dequantization and product quantization/dequantization flows
+- **Multi-threaded batch API** (OpenMP) with per-thread scratch buffers
 - Binary serialization for quantizer context (codebook + rotation matrices)
 - Intel SVML for vectorized transcendental functions (log, cos, sqrt)
 
@@ -17,13 +18,15 @@ For detailed implementation documentation, see [SIMD-AVX.md](SIMD-AVX.md).
 - `include/` — public headers
 - `src/codebook.c` — codebook generation with SIMD bitonic sort
 - `src/lin_alg.c` — AVX2 linear algebra runtime + math ops
-- `src/turboquant.c` — quantization implementation
+- `src/turboquant.c` — quantization implementation (single-thread + batch API)
+- `tests/suits/test_turboquant_mt.c` — multi-threaded batch test suite
 - `src/initialize_context.c` — utility executable that precomputes and saves a context
 
 ## Build requirements
 
 - CMake >= 3.20
 - Intel oneAPI compiler suite (icx/icpx)
+- OpenMP (bundled with Intel oneAPI)
 - CPU with AVX2 + FMA3 support (Haswell/Excavator or newer)
 
 ### Check CPU support
@@ -42,7 +45,9 @@ cmake --build build -j
 ```
 
 This builds:
-- `libturboquant.so` — shared library with AVX2 kernels
+- `libturboquant.so` — shared library with AVX2 + OpenMP batch kernels
+- `test_turboquant` — single-threaded regression tests
+- `test_turboquant_mt` — multi-threaded batch correctness + benchmark tests
 - `turboquant_context_factory` — executable for precomputing contexts
 
 ## Installation (shared library + headers)
@@ -128,6 +133,60 @@ if (turboquant_init_load("turboquant_1536_3bit.bin") != QUANT_SUCCESS) {
 turboquant_clean();
 ```
 
+### 4) Multi-threaded batch API
+
+For high-throughput processing of many vectors, use the batch API which manages
+per-thread scratch buffers internally and parallelizes over OpenMP threads:
+
+```c
+#include <stdlib.h>
+#include <turboquant.h>
+
+int main(void) {
+    const size_t dims = 1536;
+    const uint8_t bit_width = 2;
+    const size_t n = 512;
+    const size_t n_threads = 4;
+
+    /* Allocate input vectors */
+    vector_t **vecs = calloc(n, sizeof(vector_t *));
+    for (size_t i = 0; i < n; i++)
+        vecs[i] = lin_alg_create_vector(dims); /* fill ... */
+
+    /* Initialize batch context with per-thread scratch buffers */
+    turboquant_batch_ctx_t *ctx = NULL;
+    if (turboquant_batch_init(&ctx, dims, bit_width, n_threads) != QUANT_SUCCESS) {
+        fprintf(stderr, "batch init failed\n");
+        return 1;
+    }
+
+    /* Quantize entire batch in parallel */
+    quantization_result *results = calloc(n, sizeof(quantization_result));
+    turboquant_batch_quantize(ctx, vecs, results, n);
+
+    /* Dequantize entire batch in parallel */
+    vector_t **reconstructed = turboquant_batch_dequantize(ctx, results, n);
+
+    /* Save context for later reuse */
+    turboquant_batch_save(ctx, "batch_ctx.bin");
+
+    /* Cleanup */
+    turboquant_batch_results_destroy(&reconstructed);
+    for (size_t i = 0; i < n; i++) {
+        free(results[i].bstring);
+        free(results[i].qjl);
+    }
+    free(results);
+    turboquant_batch_destroy(&ctx);
+    return 0;
+}
+```
+
+**Key properties:**
+- Each thread gets its own isolated scratch buffers (no false sharing)
+- `n_threads` controls the OpenMP team size; threads are pinned via `num_threads`
+- Context is reusable across multiple batches without reallocation
+
 ## Generate a serialized TurboQuant context
 
 After building:
@@ -142,8 +201,8 @@ By default this writes:
 
 ## Performance notes
 
-- Single-core AVX2 throughput: ~50K–100K blocks/sec (128D vectors)
-- Multi-core (OpenMP) can scale to 400K–800K+ blocks/sec on 8+ cores
+- Single-core AVX2 throughput: ~378 vectors/sec (1536D, Ice Lake)
+- Multi-core batch API: ~916 vectors/sec on 4 threads (2.4x speedup), ~1070 vectors/sec on 8 threads (2.8x speedup)
 - Optimal batch size for single-core: 64–256 vectors (L2 cache resident)
 - See [SIMD-AVX.md](SIMD-AVX.md) for detailed benchmarks and hardware recommendations.
 
@@ -151,4 +210,5 @@ By default this writes:
 
 - All memory is 32-byte aligned via `posix_memalign` for `vmovaps` loads/stores
 - The context factory uses `turboquant_init` / `turboquant_save` / `turboquant_clean` (current API)
-- Multi-threading is caller-managed; the library itself is single-threaded AVX2
+- The batch API uses OpenMP with `num_threads` to bound the thread team to pre-allocated buffer count
+- Single-threaded API (`turboquant_init` / `turboquant_prod_quantization`) remains available for low-latency single-vector workloads
