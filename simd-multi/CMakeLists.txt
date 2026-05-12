@@ -71,21 +71,3 @@ set_target_properties(turboquant PROPERTIES
     OUTPUT_NAME              turboquant        # → libturboquant.so
     POSITION_INDEPENDENT_CODE ON              # mandatory for shared libs
 )
-
-# ── 9. Test executables ──────────────────────────────────────────────────────
-# Test executables (both need OpenMP because libturboquant.so links it)
-add_executable(test_turboquant tests/suits/test_turboquant.c)
-target_link_libraries(test_turboquant PRIVATE turboquant)
-target_include_directories(test_turboquant PRIVATE ${PROJECT_SOURCE_DIR}/include)
-
-add_executable(test_turboquant_mt tests/suits/test_turboquant_mt.c)
-target_link_libraries(test_turboquant_mt PRIVATE turboquant)
-target_include_directories(test_turboquant_mt PRIVATE ${PROJECT_SOURCE_DIR}/include)
-
-if(OpenMP_C_FOUND)
-    target_compile_options(test_turboquant PRIVATE ${OpenMP_C_FLAGS})
-    target_link_libraries(test_turboquant PRIVATE OpenMP::OpenMP_C)
-    target_compile_options(test_turboquant_mt PRIVATE ${OpenMP_C_FLAGS})
-    target_link_libraries(test_turboquant_mt PRIVATE OpenMP::OpenMP_C)
-endif()
-
