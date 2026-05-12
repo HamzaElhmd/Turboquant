@@ -1,5 +1,4 @@
 #include <complex.h>
-#include <lin_alg.h>
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
@@ -7,7 +6,6 @@
 
 #include "../include/config.h"
 #include "../include/codebook.h"
-#include "../include/lin_alg.h"
 
 float codebook_scaled_beta_pdf(const float x, const size_t d) {
     if (x > 1.0f || x < -1.0f)
