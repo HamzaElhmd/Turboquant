@@ -1,6 +1,6 @@
-# TurboQuantQuantization
+# TurboQuant
 
-TurboQuantQuantization is a CPU-native vector quantization library using Intel AVX2 SIMD instructions. It implements TurboQuant-style MSE + residual (QJL sign) quantization for high-dimensional vectors, optimized for modern x86-64 CPUs with AVX2 and FMA3 support.
+TurboQuant is a CPU-native vector quantization library using Intel AVX2 SIMD instructions. It implements TurboQuant-style MSE + residual (QJL sign) quantization for high-dimensional vectors, optimized for modern x86-64 CPUs with AVX2 and FMA3 support.
 
 For detailed implementation documentation, see [SIMD-AVX.md](SIMD-AVX.md).
 

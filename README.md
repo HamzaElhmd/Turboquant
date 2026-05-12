@@ -1,4 +1,4 @@
-# TurboQuant Quantization
+# TurboQuant
 
 TurboQuant is a high-performance vector quantization library implementing TurboQuant-style MSE + residual (QJL sign) quantization. It supports four execution variants optimized for different hardware parallelism models and concurrency levels.
 

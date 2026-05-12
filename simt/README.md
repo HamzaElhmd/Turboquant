@@ -1,6 +1,6 @@
 # TurboQuant SIMT (CUDA)
 
-TurboQuantQuantization is a CUDA-based vector quantization prototype centered on TurboQuant-style MSE + residual (QJL sign) quantization. It targets NVIDIA GPUs using the SIMT (Single Instruction, Multiple Threads) execution model via the CUDA toolkit.
+TurboQuant is a CUDA-based vector quantization prototype centered on TurboQuant-style MSE + residual (QJL sign) quantization. It targets NVIDIA GPUs using the SIMT (Single Instruction, Multiple Threads) execution model via the CUDA toolkit.
 
 ## Current scope
 - CUDA linear algebra backend (cuBLAS + cuSOLVER + cuRAND)
