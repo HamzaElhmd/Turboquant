@@ -657,6 +657,7 @@ static uint8_t prod_quantization_ctx(turbo_quantizer *q, vector_t *x,
     uint8_t *qjl_packed = (uint8_t*) calloc(1, qjl_bytes);
     if (qjl_packed == NULL) { free(bstring); return QUANT_PROD_FAILED; }
 
+    printf("Dimensions on the Quantizer");
     for (int i = 0; i < (int)q->dims; i++) {
         uint8_t sign = (tc->result->vector[i] < 0.0f) ? 1 : 0;
         pack_dynamic(qjl_packed, i, 1, sign);
@@ -684,6 +685,7 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
     if (lin_alg_dot_productmv(q->t_S, tc->qj1_floats, tc->x_qj1) != SUCCESS)
         return NULL;
 
+    printf("q->dim = %ld.\n", q->dims);
     float scale = (sqrtf(PI / 2.0f) / (float)q->dims) * res->residual_l2;
     if (lin_alg_scale_vector(tc->x_qj1, scale) != SUCCESS)
         return NULL;
