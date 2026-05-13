@@ -59,8 +59,13 @@ target_link_libraries(turboquant PRIVATE
 # ── 7. Find OpenMP for multi-threaded batch API ────────────────────────────
 find_package(OpenMP)
 if(OpenMP_C_FOUND)
-    target_compile_options(turboquant PRIVATE ${OpenMP_C_FLAGS})
-    target_link_libraries(turboquant PRIVATE OpenMP::OpenMP_C)
+    # If using Intel compiler, ensure we use -qopenmp
+    if(CMAKE_C_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(turboquant PRIVATE -qopenmp)
+        target_link_options(turboquant PRIVATE -qopenmp)
+    else()
+        target_link_libraries(turboquant PRIVATE OpenMP::OpenMP_C)
+    endif()
 else()
     message(WARNING "OpenMP not found: multi-threaded batch API will not build.")
 endif()
@@ -71,3 +76,27 @@ set_target_properties(turboquant PROPERTIES
     OUTPUT_NAME              turboquant        # → libturboquant.so
     POSITION_INDEPENDENT_CODE ON              # mandatory for shared libs
 )
+
+# ── 9. Test executables ──────────────────────────────────────────────────────
+# Test executables (both need OpenMP because libturboquant.so links it)
+add_executable(test_turboquant tests/suits/test_turboquant.c)
+target_link_libraries(test_turboquant PRIVATE turboquant)
+target_include_directories(test_turboquant PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+add_executable(test_turboquant_mt tests/suits/test_turboquant_mt.c)
+target_link_libraries(test_turboquant_mt PRIVATE turboquant)
+target_include_directories(test_turboquant_mt PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+# Apply the same logic to your test targets
+if(OpenMP_C_FOUND)
+    if(CMAKE_C_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(test_turboquant PRIVATE -qopenmp)
+        target_link_options(test_turboquant PRIVATE -qopenmp)
+
+        target_compile_options(test_turboquant_mt PRIVATE -qopenmp)
+        target_link_options(test_turboquant_mt PRIVATE -qopenmp)
+    else()
+        target_link_libraries(test_turboquant PRIVATE OpenMP::OpenMP_C)
+        target_link_libraries(test_turboquant_mt PRIVATE OpenMP::OpenMP_C)
+    endif()
+endif()
