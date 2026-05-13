@@ -691,6 +691,21 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
     if (lin_alg_add_vectors(x_mse, tc->x_qj1) != SUCCESS)
         return NULL;
 
+
+    // --- C-LEVEL BOUNDARY CHECK ---
+    float c_max = 0.0f;
+    for(size_t i = 0; i < q->dims; i++) {
+        if (fabsf(x_mse->vector[i]) > c_max) {
+            c_max = fabsf(x_mse->vector[i]);
+        }
+    }
+    // If the value exceeds theoretical bounds, catch it here
+    if (c_max > 10.0f) {
+        printf("🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n",
+               c_max, res->residual_l2, scale);
+    }
+    // ------------------------------
+
     return x_mse;
 }
 
