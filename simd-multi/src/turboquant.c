@@ -701,11 +701,15 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
     }
     // If the value exceeds theoretical bounds, catch it here
     if (c_max > 10.0f) {
-        printf("🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n",
+        fprintf(stderr, "🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n",
                c_max, res->residual_l2, scale);
+
+        fflush(stderr);
     }
     // ------------------------------
-    printf("[C-DEBUG] C_MAX is %.2f\n", c_max);
+    fprintf(stderr, "[C-DEBUG] C_MAX is %.2f\n", c_max);
+    fflush(stderr);
+
     return x_mse;
 }
 
