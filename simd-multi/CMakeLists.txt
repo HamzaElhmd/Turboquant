@@ -86,17 +86,3 @@ target_include_directories(test_turboquant PRIVATE ${PROJECT_SOURCE_DIR}/include
 add_executable(test_turboquant_mt tests/suits/test_turboquant_mt.c)
 target_link_libraries(test_turboquant_mt PRIVATE turboquant)
 target_include_directories(test_turboquant_mt PRIVATE ${PROJECT_SOURCE_DIR}/include)
-
-# Apply the same logic to your test targets
-if(OpenMP_C_FOUND)
-    if(CMAKE_C_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(test_turboquant PRIVATE -qopenmp)
-        target_link_options(test_turboquant PRIVATE -qopenmp)
-
-        target_compile_options(test_turboquant_mt PRIVATE -qopenmp)
-        target_link_options(test_turboquant_mt PRIVATE -qopenmp)
-    else()
-        target_link_libraries(test_turboquant PRIVATE OpenMP::OpenMP_C)
-        target_link_libraries(test_turboquant_mt PRIVATE OpenMP::OpenMP_C)
-    endif()
-endif()
