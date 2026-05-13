@@ -691,8 +691,7 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
     if (lin_alg_add_vectors(x_mse, tc->x_qj1) != SUCCESS)
         return NULL;
 
-
-    // --- NUCLEAR C-LEVEL BOUNDARY CHECK ---
+    // --- FORENSIC C-LEVEL BOUNDARY CHECK ---
     float c_max = 0.0f;
     for(size_t i = 0; i < q->dims; i++) {
         if (fabsf(x_mse->vector[i]) > c_max) {
@@ -700,19 +699,27 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
         }
     }
     
-    // Write directly to a file on disk (thread-safe append mode)
     if (c_max > 10.0f) {
-        FILE *debug_file = fopen("c_math_debug.log", "a");
-        if (debug_file) {
-            fprintf(debug_file, "🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n", 
-                    c_max, res->residual_l2, scale);
-            fclose(debug_file);
-        }
+        FILE *c_forensics = fopen("c_forensics.log", "a");
+        
+        int tid = omp_get_thread_num(); // Safe to call here
+        
+        fprintf(c_forensics, "\n🚨 [THREAD %d] EXPLOSION SNAPSHOT! C_Max: %.2f\n", tid, c_max);
+        fprintf(c_forensics, "   -> TC Pointer:        %p\n", (void*)tc);
+        fprintf(c_forensics, "   -> x_mse Pointer:     %p\n", (void*)tc->x_mse);
+        
+        // 1. Check the raw bytes provided by PyTorch
+        fprintf(c_forensics, "   -> Bstring memory:    [%02x %02x %02x %02x]\n", 
+                res->bstring[0], res->bstring[1], res->bstring[2], res->bstring[3]);
+        
+        // 2. Check the unpacked centroids (before rotation)
+        // If these are huge, unpack_dynamic is failing. If these are small (~2.0), the matrix math failed.
+        fprintf(c_forensics, "   -> y_hat[0-3]:        [%.2f, %.2f, %.2f, %.2f]\n", 
+                tc->y->vector[0], tc->y->vector[1], tc->y->vector[2], tc->y->vector[3]);
+        
+        fclose(c_forensics);
     }
-    // --------------------------------------
-    FILE *testing_file = fopen("c_test_file.log", "a");
-    fprintf(testing_file, "[C-DEBUG] C_MAX is %.2f\n", c_max);
-    fclose(testing_file);
+    // ---------------------------------------
 
     return x_mse;
 }
