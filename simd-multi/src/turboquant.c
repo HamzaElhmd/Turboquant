@@ -692,23 +692,27 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
         return NULL;
 
 
-    // --- C-LEVEL BOUNDARY CHECK ---
+    // --- NUCLEAR C-LEVEL BOUNDARY CHECK ---
     float c_max = 0.0f;
     for(size_t i = 0; i < q->dims; i++) {
         if (fabsf(x_mse->vector[i]) > c_max) {
             c_max = fabsf(x_mse->vector[i]);
         }
     }
-    // If the value exceeds theoretical bounds, catch it here
+    
+    // Write directly to a file on disk (thread-safe append mode)
     if (c_max > 10.0f) {
-        fprintf(stderr, "🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n",
-               c_max, res->residual_l2, scale);
-
-        fflush(stderr);
+        FILE *debug_file = fopen("c_math_debug.log", "a");
+        if (debug_file) {
+            fprintf(debug_file, "🚨 [C-DEBUG] Math Explosion! C_Max: %.2f | Res_L2: %.4f | Scale: %.6f\n", 
+                    c_max, res->residual_l2, scale);
+            fclose(debug_file);
+        }
     }
-    // ------------------------------
-    fprintf(stderr, "[C-DEBUG] C_MAX is %.2f\n", c_max);
-    fflush(stderr);
+    // --------------------------------------
+    FILE *testing_file = fopen("c_test_file.log", "a");
+    fprintf(testing_file, "[C-DEBUG] C_MAX is %.2f\n", c_max);
+    fclose(testing_file);
 
     return x_mse;
 }
