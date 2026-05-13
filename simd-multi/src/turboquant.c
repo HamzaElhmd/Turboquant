@@ -705,7 +705,7 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
                c_max, res->residual_l2, scale);
     }
     // ------------------------------
-
+    printf("[C-DEBUG] C_MAX is %.2f\n", c_max);
     return x_mse;
 }
 
