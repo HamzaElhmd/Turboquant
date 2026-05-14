@@ -80,20 +80,7 @@ vector_t* turboquant_prod_dequantization(const quantization_result *res);
  * ========================================================================== */
 
 typedef struct {
-    vector_t *y;                /* rotated vector */
-    vector_t *x_cpy;          /* L2-normalized copy of input */
-    vector_t *residual;       /* residual buffer */
-    vector_t *result;         /* S * residual */
-    vector_t *x_hat;          /* MSE reconstruction */
-    vector_t *x_mse;          /* MSE component for dequant */
-    vector_t *qj1_floats;     /* sign-expanded residual */
-    vector_t *x_qj1;          /* scaled residual component */
-    uint8_t   _pad[24];       /* padding to 64-byte cache line */
-} turboquant_thread_ctx_t;
-
-typedef struct {
     turbo_quantizer *quantizer;       /* shared read-only quantizer */
-    turboquant_thread_ctx_t **threads;/* per-thread scratch buffers */
     size_t             n_threads;      /* number of threads allocated */
     size_t             dims;           /* vector dimension */
     uint8_t            bit_width;      /* MSE bit width */
