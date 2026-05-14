@@ -2,6 +2,9 @@
 #include "../include/errors.h"
 #include "../include/config.h"
 #include "../include/lin_alg.h"
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <stdio.h>
 #include <immintrin.h>
 #include <complex.h>
@@ -691,6 +694,7 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
     if (lin_alg_add_vectors(x_mse, tc->x_qj1) != SUCCESS)
         return NULL;
 
+/*
     // --- FORENSIC C-LEVEL BOUNDARY CHECK ---
     float c_max = 0.0f;
     for(size_t i = 0; i < q->dims; i++) {
@@ -728,6 +732,7 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
         fclose(c_forensics);
     }
     // ---------------------------------------
+*/
 
     return x_mse;
 }
@@ -936,12 +941,29 @@ vector_t** turboquant_batch_dequantize(turboquant_batch_ctx_t *ctx,
     vector_t **out = (vector_t**) malloc((batch_size + 1) * sizeof(vector_t*));
     if (out == NULL) return NULL;
 
+    // Clear the forensics log at the start of a batch
+    FILE *init_log = fopen("c_collision_test.log", "w");
+    if (init_log) {
+        fprintf(init_log, "--- NEW BATCH DECOMPRESSION (Size: %zu) ---\n", batch_size);
+        fclose(init_log);
+    }
+
     #pragma omp parallel for schedule(static) num_threads((int)ctx->n_threads)
     for (size_t i = 0; i < batch_size; i++) {
-        int tid = omp_get_thread_num();
-        turboquant_thread_ctx_t *tc = ctx->threads[tid];
+        int omp_tid = omp_get_thread_num();
+        long os_tid =syscall(SYS_gettid);
+        turboquant_thread_ctx_t *tc = ctx->threads[omp_tid];
 
-        vector_t *tmp = prod_dequantization_ctx(ctx->quantizer, &results[i], tc);
+        // LOG START
+        FILE *f_start = fopen("c_collision_test.log", "a");
+        if (f_start) {
+            fprintf(f_start, "[START] iter: %zu | omp_tid: %d | os_tid: %ld | tc_ptr: %p\n",
+                    i, omp_tid, os_tid, (void*)tc);
+            fclose(f_start);
+        }
+
+        vector_t *tmp = prod_dequantization_ctx(ctx->quantizer, &results[i], tc); 
+
         if (tmp) {
             out[i] = lin_alg_create_vector(ctx->quantizer->dims);
             if (out[i]) {
@@ -949,6 +971,14 @@ vector_t** turboquant_batch_dequantize(turboquant_batch_ctx_t *ctx,
             }
         } else {
             out[i] = NULL;
+        }
+
+        // LOG END
+        FILE *f_end = fopen("c_collision_test.log", "a");
+        if (f_end) {
+            fprintf(f_end, "[ END ] iter: %zu | omp_tid: %d | os_tid: %ld | tc_ptr: %p\n",
+                    i, omp_tid, os_tid, (void*)tc);
+            fclose(f_end);
         }
     }
     out[batch_size] = NULL;
