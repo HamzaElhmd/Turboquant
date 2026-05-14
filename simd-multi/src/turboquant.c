@@ -717,6 +717,14 @@ static vector_t* prod_dequantization_ctx(turbo_quantizer *q,
         fprintf(c_forensics, "   -> y_hat[0-3]:        [%.2f, %.2f, %.2f, %.2f]\n", 
                 tc->y->vector[0], tc->y->vector[1], tc->y->vector[2], tc->y->vector[3]);
         
+        // 3. Inspect the matrices!
+        // A true rotation matrix should have tiny values (usually < 0.2)
+        // A Gaussian matrix will have larger values.
+        fprintf(c_forensics, "   -> t_PI[0-3]:      [%.4f, %.4f, %.4f, %.4f]\n",
+                q->t_Π->matrix[0], q->t_Π->matrix[1], q->t_Π->matrix[2], q->t_Π->matrix[3]);
+
+        fprintf(c_forensics, "   -> S[0-3]:         [%.4f, %.4f, %.4f, %.4f]\n",
+                q->S->matrix[0], q->S->matrix[1], q->S->matrix[2], q->S->matrix[3]);
         fclose(c_forensics);
     }
     // ---------------------------------------
