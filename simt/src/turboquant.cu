@@ -421,7 +421,7 @@ cleanup:
         lin_alg_free_vector(&context->y);
     }
 
-    CATCH_ASYNC_ERR("End of turboquant_init");
+    CATCH_ASYNC_ERR("End of turboquant_init_load");
     return error_code;
 }
 
