@@ -154,6 +154,8 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     if (dims == 0 || bit_width == 0)
         return QUANT_INIT_FAILED;
 
+    CATCH_ASYNC_ERR("INIT PHASE 0: Entry");
+
     *context = (turboquant_context_t*) malloc(sizeof(turboquant_context_t));
     if (*context == NULL)
         return QUANT_INIT_FAILED;
@@ -169,6 +171,8 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+    CATCH_ASYNC_ERR("INIT PHASE 1: After turboquant_quantizer_init");
+
     (*context)->mse_buffer = lin_alg_create_vector(dims);
     if ((*context)->mse_buffer == NULL) {
         turboquant_clean(*context);
@@ -182,6 +186,8 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         free(*context);
         return QUANT_INIT_FAILED;
     }
+
+    CATCH_ASYNC_ERR("INIT PHASE 2: After lin_alg_create_vector");
 
     /* ----------- Byte Array Allocation on GPU and CPU ---------- */
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
@@ -205,6 +211,9 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     memset((*context)->h_qjl, 0, qjl_size);
     /* ---------------------------------------------------------- */
     
+
+    CATCH_ASYNC_ERR("INIT PHASE 3: After Host Mappings");
+
     cudaStream_t stream;
     if (cudaStreamCreate(&stream) != cudaSuccess) {
         turboquant_clean(*context);
@@ -212,12 +221,16 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+    CATCH_ASYNC_ERR("INIT PHASE 4: After Stream Create");
+
     (*context)->compute_stream = (void *)stream;
     if (lin_alg_set_stream((*context)->compute_stream) != SUCCESS) {
         turboquant_clean(*context);
         free(*context);
         return QUANT_INIT_FAILED;
     }
+
+    CATCH_ASYNC_ERR("INIT PHASE 5: After lin_alg_set_stream");
 
     CATCH_ASYNC_ERR("End of turboquant_init");
     (*context)->is_init = 1;
