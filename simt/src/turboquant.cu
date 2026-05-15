@@ -232,7 +232,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
 
     CATCH_ASYNC_ERR("INIT PHASE 5: After lin_alg_set_stream");
 
-    CATCH_ASYNC_ERR("End of turboquant_init");
+    // CATCH_ASYNC_ERR("End of turboquant_init");
     
     (*context)->is_init = 1;
     return QUANT_SUCCESS;
