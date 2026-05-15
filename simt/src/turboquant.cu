@@ -300,7 +300,6 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     uint8_t bit_width;
     uint16_t n;
     float *row_buffer = NULL;
-    FILE *f_ptr = NULL;
 
     if (fread(&dims, sizeof(size_t), 1, f) != 1) { error_code = QUANT_INIT_FAILED; goto cleanup; }
     if (fread(&bit_width, sizeof(uint8_t), 1, f) != 1) { error_code = QUANT_INIT_FAILED; goto cleanup; }
@@ -324,14 +323,10 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     context->mse_quantizer->dims = dims;
     context->mse_quantizer->bit_width = bit_width;
 
-    // --- POINTER FORENSICS TRAP ---
-    f_ptr = fopen("simt_forensics.log", "a");
-    if (f_ptr) {
-        fprintf(f_ptr, "[FORENSICS] POINTER CHECK: d_centroids initialized at address: %p\n",
-                (void*)context->mse_quantizer->d_centroids);
-        fclose(f_ptr);
-    }
-    // ------------------------------
+    context->mse_quantizer->d_centroids = NULL;
+    context->mse_quantizer->book = NULL;
+    context->mse_quantizer->Π = NULL;
+    context->mse_quantizer->S = NULL;
 
     if (!context->compute_stream) {
         cudaStream_t stream;
