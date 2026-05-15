@@ -10,6 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+// --- FORENSICS MACRO ---
+#define FORENSIC_LOG(step_name, cuda_err) do { \
+    FILE *f_log = fopen("simt_forensics.log", "a"); \
+    if (f_log) { \
+        fprintf(f_log, "[FORENSICS] %s | Code: %d | Message: %s\n", \
+                step_name, cuda_err, cudaGetErrorString(cuda_err)); \
+        fclose(f_log); \
+    } \
+} while(0)
+// -----------------------
+
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
         if ((*quantizer)) {
@@ -158,18 +169,28 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+    /* ----------- Byte Array Allocation on GPU and CPU ---------- */
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    
+    cudaError_t err_b = cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    FORENSIC_LOG("turboquant_init -> bstring mapping", err_b);
+    
     (*context)->bstring_size = b_size;
     memset((*context)->h_bstring, 0, b_size);
+    /* ---------------------------------------------------------- */
 
+    /* ----------- QJL Byte Array Allocation on GPU and CPU ---------- */
     size_t qjl_size = ((dims + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
+    
+    cudaError_t err_q = cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
+    FORENSIC_LOG("turboquant_init -> qjl mapping", err_q);
+
     (*context)->qjl_size = qjl_size;
     memset((*context)->h_qjl, 0, qjl_size);
-
+    /* ---------------------------------------------------------- */
+    
     cudaStream_t stream;
     if (cudaStreamCreate(&stream) != cudaSuccess) {
         turboquant_clean(*context);
@@ -288,12 +309,18 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         if (context->bstring_size != b_size) {
             cudaFreeHost(context->h_bstring);
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            
+            cudaError_t err_load_b1 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            FORENSIC_LOG("turboquant_init_load (realloc) -> bstring mapping", err_load_b1);
+
             context->bstring_size = b_size;
         }
     } else {
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+
+            cudaError_t err_load_b2 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            FORENSIC_LOG("turboquant_init_load (fresh) -> bstring mapping", err_load_b2);
+
             context->bstring_size = b_size;
     }
 
@@ -304,12 +331,18 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         if (context->qjl_size != qjl_size) {
             cudaFreeHost(context->h_qjl);
             cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+
+            cudaError_t err_load_q1 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+            FORENSIC_LOG("turboquant_init_load (realloc) -> qjl mapping", err_load_q1);
+            
             context->qjl_size = qjl_size;
         }
     } else {
         cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+        
+        cudaError_t err_load_q2 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+        FORENSIC_LOG("turboquant_init_load (fresh) -> qjl mapping", err_load_q2);
+
         context->qjl_size = qjl_size;
     }
     memset(context->h_qjl, 0, qjl_size);
