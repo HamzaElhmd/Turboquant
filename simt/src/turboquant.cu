@@ -21,6 +21,20 @@
 } while(0)
 // -----------------------
 
+
+#define CATCH_ASYNC_ERR(tag) do { \
+    cudaDeviceSynchronize(); \
+    cudaError_t e = cudaGetLastError(); \
+    if (e != cudaSuccess) { \
+        FILE *f_log = fopen("simt_async_forensics.log", "a"); \
+        if (f_log) { \
+            fprintf(f_log, "[FORENSICS] ASYNC TRAP: %s | Code: %d | Msg: %s\n", tag, e, cudaGetErrorString(e)); \
+            fclose(f_log); \
+        } \
+    } \
+} while(0)
+
+
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
         if ((*quantizer)) {
@@ -205,6 +219,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+    CATCH_ASYNC_ERR("End of turboquant_init");
     (*context)->is_init = 1;
     return QUANT_SUCCESS;
 }
@@ -394,6 +409,7 @@ cleanup:
         lin_alg_free_vector(&context->y);
     }
 
+    CATCH_ASYNC_ERR("End of turboquant_init");
     return error_code;
 }
 
