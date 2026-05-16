@@ -847,39 +847,34 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     DEBUG_STEP(3, "Transposing S matrix...");
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     
-    /* DEBUG: Measure norm BEFORE dot_productmv */
-    float *h_temp_before = (float*)malloc(d * sizeof(float));
-    float norm_before = 0.0f;
-    if (h_temp_before) {
-        cudaMemcpy(h_temp_before, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
-        float sum_sq = 0.0f;
-        for (int i = 0; i < (int)d; i++) sum_sq += h_temp_before[i] * h_temp_before[i];
-        norm_before = sqrtf(sum_sq);
-        DEBUG_STEP(3, "BEFORE dot_productmv: norm=%.4f (expected ~11.31)", norm_before);
+    /* Allocate temporary vector for output (avoid buffer aliasing) */
+    vector_t *temp_output = lin_alg_create_vector(d);
+    if (temp_output == NULL) {
+        DEBUG_STEP(3, "FAILED: Could not allocate temporary vector");
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        return NULL;
     }
     
-    DEBUG_STEP(3, "Calling lin_alg_dot_productmv(S^T, mse_buffer, mse_buffer) - BUFFER ALIASING!");
-    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->mse_buffer) != SUCCESS) {
+    DEBUG_STEP(3, "Calling lin_alg_dot_productmv(S^T, mse_buffer, temp_output) - NO ALIASING");
+    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, temp_output) != SUCCESS) {
         DEBUG_STEP(3, "FAILED: lin_alg_dot_productmv");
-        free(h_temp_before);
+        lin_alg_free_vector(&temp_output);
         lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
     }
     cudaStreamSynchronize(stream);
     
-    /* DEBUG: Measure norm AFTER dot_productmv */
-    if (h_temp_before) {
-        cudaMemcpy(h_temp_before, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
-        float sum_sq = 0.0f;
-        for (int i = 0; i < (int)d; i++) sum_sq += h_temp_before[i] * h_temp_before[i];
-        float norm_after = sqrtf(sum_sq);
-        DEBUG_STEP(3, "AFTER dot_productmv: norm=%.4f, ratio=%.4fx", norm_after, norm_after / norm_before);
-        DEBUG_STEP(3, "INFLATION DETECTED: %s", (norm_after > norm_before * 1.5f) ? "YES - BUFFER ALIASING BUG!" : "NO");
-        free(h_temp_before);
+    /* Copy result back to mse_buffer */
+    if (lin_alg_copy_vector(context->mse_buffer, temp_output) != SUCCESS) {
+        DEBUG_STEP(3, "FAILED: lin_alg_copy_vector");
+        lin_alg_free_vector(&temp_output);
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        return NULL;
     }
     
+    lin_alg_free_vector(&temp_output);
     lin_alg_transpose_matrix(context->mse_quantizer->S);
-    DEBUG_CHECKPOINT("STEP 3 DONE");
+    DEBUG_CHECKPOINT("STEP 3 DONE (buffer aliasing fixed)");
 
     /* Step 4: Apply scaling factor */
     float scale = (sqrtf(PI / 2.0f) / (float)d) * res->residual_l2;
