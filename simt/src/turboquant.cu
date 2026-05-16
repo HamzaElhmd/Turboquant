@@ -864,12 +864,35 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     }
     cudaStreamSynchronize(stream);
     
+    /* DEBUG: Verify norms after dot product */
+    float *h_temp = (float*)malloc(d * sizeof(float));
+    if (h_temp) {
+        cudaMemcpy(h_temp, temp_output->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
+        float sum_sq = 0.0f;
+        for (int i = 0; i < (int)d; i++) sum_sq += h_temp[i] * h_temp[i];
+        float norm_temp = sqrtf(sum_sq);
+        DEBUG_STEP(3, "AFTER dot_productmv to temp_output: norm=%.4f (expected ~11.31)", norm_temp);
+        free(h_temp);
+    }
+    
     /* Copy result back to mse_buffer */
+    DEBUG_STEP(3, "Copying temp_output -> mse_buffer...");
     if (lin_alg_copy_vector(context->mse_buffer, temp_output) != SUCCESS) {
         DEBUG_STEP(3, "FAILED: lin_alg_copy_vector");
         lin_alg_free_vector(&temp_output);
         lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
+    }
+    
+    /* DEBUG: Verify norms after copy */
+    h_temp = (float*)malloc(d * sizeof(float));
+    if (h_temp) {
+        cudaMemcpy(h_temp, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
+        float sum_sq = 0.0f;
+        for (int i = 0; i < (int)d; i++) sum_sq += h_temp[i] * h_temp[i];
+        float norm_mse = sqrtf(sum_sq);
+        DEBUG_STEP(3, "AFTER copy to mse_buffer: norm=%.4f", norm_mse);
+        free(h_temp);
     }
     
     lin_alg_free_vector(&temp_output);
