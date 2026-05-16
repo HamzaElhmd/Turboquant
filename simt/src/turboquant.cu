@@ -11,6 +11,9 @@
 #include <string.h>
 
 /* === DEBUG MACROS FOR NORM TRACING === */
+/* NOTE: These macros do NOT access GPU memory directly (would segfault).
+ * They log control flow and expected values only.
+ */
 #define DEBUG_LOG_PATH "/tmp/turboquant_debug.log"
 static FILE* g_debug_log = NULL;
 static int g_debug_count = 0;
@@ -42,14 +45,12 @@ static int g_debug_count = 0;
     DEBUG_PRINT("  === End call #%d ===\n\n", g_debug_count); \
 } while(0)
 
-#define DEBUG_NORM(vec, n, label) do { \
-    float _sum_sq = 0.0f; \
-    for (int _i = 0; _i < (n); _i++) { _sum_sq += (vec)[_i] * (vec)[_i]; } \
-    DEBUG_PRINT("  [%s] norm=%.4f\n", label, sqrtf(_sum_sq)); \
-} while(0)
-
 #define DEBUG_STEP(step_id, fmt, ...) do { \
     DEBUG_PRINT("  [STEP %d] " fmt "\n", step_id, ##__VA_ARGS__); \
+} while(0)
+
+#define DEBUG_CHECKPOINT(label) do { \
+    DEBUG_PRINT("  [CHECKPOINT %s] Reached line %d\n", label, __LINE__); \
 } while(0)
 /* === END DEBUG MACROS === */
 
@@ -819,58 +820,60 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     DEBUG_START_CALL(d, res->residual_l2);
 
     /* Step 1: Reconstruct the primary MSE component */
+    DEBUG_STEP(1, "Calling turboquant_mse_dequantization...");
     if (turboquant_mse_dequantization(context) == NULL) {
         DEBUG_STEP(1, "FAILED: MSE dequantization");
         return NULL;
     }
     cudaStreamSynchronize(stream);
-    DEBUG_NORM(context->y->vector, d, "STEP 1");
+    DEBUG_CHECKPOINT("STEP 1 DONE");
 
     /* Step 2: Reconstruct the residual component signs */
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
     
+    DEBUG_STEP(2, "Launching turboquant_qjl_expand_kernel (threads=%d, blocks=%d)", threads, blocks);
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
         (uint32_t*)context->d_qjl, 
         context->mse_buffer->vector, 
         d
     );
+    DEBUG_CHECKPOINT("STEP 2 KERNEL LAUNCHED");
     cudaStreamSynchronize(stream);
-    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 2");
-    DEBUG_STEP(2, "Expected norm after QJL expand: %.4f", sqrtf((float)d));
+    DEBUG_CHECKPOINT("STEP 2 DONE");
+    DEBUG_STEP(2, "Expected norm after QJL expand: sqrt(d)=%.4f", sqrtf((float)d));
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
+    DEBUG_STEP(3, "Transposing S matrix...");
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     
+    DEBUG_STEP(3, "Calling lin_alg_dot_productmv(S^T, mse_buffer, mse_buffer) - BUFFER ALIASING!");
     if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->mse_buffer) != SUCCESS) {
+        DEBUG_STEP(3, "FAILED: lin_alg_dot_productmv");
         lin_alg_transpose_matrix(context->mse_quantizer->S);
-        DEBUG_STEP(3, "FAILED: lin_alg_dot_productmv (buffer aliasing!)");
         return NULL;
     }
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     cudaStreamSynchronize(stream);
-    
-    float _sum_sq = 0.0f;
-    for (int _i = 0; _i < (int)d; _i++) { _sum_sq += context->mse_buffer->vector[_i] * context->mse_buffer->vector[_i]; }
-    float _norm_step3 = sqrtf(_sum_sq);
-    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 3");
-    DEBUG_STEP(3, "RATIO step3/step2 = %.4f (expected ~1.0 if S is orthogonal)", _norm_step3 / sqrtf((float)d));
+    DEBUG_CHECKPOINT("STEP 3 DONE");
 
     /* Step 4: Apply scaling factor */
     float scale = (sqrtf(PI / 2.0f) / (float)d) * res->residual_l2;
     DEBUG_STEP(4, "Scale = (sqrt(pi/2)/%zu) * %.4f = %.4f", d, res->residual_l2, scale);
     
+    DEBUG_STEP(4, "Calling lin_alg_scale_vector...");
     lin_alg_scale_vector(context->mse_buffer, scale);
     cudaStreamSynchronize(stream);
-    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 4");
+    DEBUG_CHECKPOINT("STEP 4 DONE");
 
     /* Step 5: Final Sum (x_mse + x_residual) */
+    DEBUG_STEP(5, "Calling lin_alg_add_vectors(y, mse_buffer)...");
     if (lin_alg_add_vectors(context->y, context->mse_buffer) != SUCCESS) {
         DEBUG_STEP(5, "FAILED: lin_alg_add_vectors");
         return NULL;
     }
     cudaStreamSynchronize(stream);
-    DEBUG_NORM(context->y->vector, d, "STEP 5 FINAL");
+    DEBUG_CHECKPOINT("STEP 5 DONE");
     DEBUG_END_CALL();
 
     return context->y; 
