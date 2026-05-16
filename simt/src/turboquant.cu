@@ -847,6 +847,32 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     DEBUG_STEP(3, "Transposing S matrix...");
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     
+    /* DEBUG: Verify S matrix row norm */
+    {
+        float *h_row = (float*)malloc(d * sizeof(float));
+        if (h_row) {
+            // Copy first row of S to host
+            cudaMemcpy(h_row, (float*)context->mse_quantizer->S->matrix, d * sizeof(float), cudaMemcpyDeviceToHost);
+            float sum_sq = 0.0f;
+            for (int i = 0; i < (int)d; i++) sum_sq += h_row[i] * h_row[i];
+            float row_norm = sqrtf(sum_sq);
+            
+            // Check a few values
+            DEBUG_STEP(3, "S matrix row[0] norm=%.4f (expected ~11.31 for N(0,1))", row_norm);
+            DEBUG_STEP(3, "S[0,0]=%.4f, S[0,1]=%.4f, S[0,2]=%.4f", h_row[0], h_row[1], h_row[2]);
+            
+            // Compute Frobenius norm of S
+            float frob_sq = 0.0f;
+            for (int i = 0; i < 5; i++) {  // Check first 5 rows
+                cudaMemcpy(h_row, (float*)context->mse_quantizer->S->matrix + i * context->mse_quantizer->S->stride, 
+                          d * sizeof(float), cudaMemcpyDeviceToHost);
+                for (int j = 0; j < (int)d; j++) frob_sq += h_row[j] * h_row[j];
+            }
+            DEBUG_STEP(3, "S Frobenius norm (first 5 rows)=%.4f", sqrtf(frob_sq));
+            free(h_row);
+        }
+    }
+    
     /* Allocate temporary vector for output (avoid buffer aliasing) */
     vector_t *temp_output = lin_alg_create_vector(d);
     if (temp_output == NULL) {
