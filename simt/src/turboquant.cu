@@ -842,6 +842,21 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     cudaStreamSynchronize(stream);
     DEBUG_CHECKPOINT("STEP 2 DONE");
     DEBUG_STEP(2, "Expected norm after QJL expand: sqrt(d)=%.4f", sqrtf((float)d));
+    
+    /* DEBUG: Verify mse_buffer norm BEFORE dot product */
+    {
+        float *h_buf = (float*)malloc(d * sizeof(float));
+        if (h_buf) {
+            cudaMemcpy(h_buf, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
+            float sum_sq = 0.0f;
+            for (int i = 0; i < (int)d; i++) sum_sq += h_buf[i] * h_buf[i];
+            float buf_norm = sqrtf(sum_sq);
+            DEBUG_STEP(2, "mse_buffer norm BEFORE dot_productmv: %.4f (expected ~11.31)", buf_norm);
+            DEBUG_STEP(2, "mse_buffer[0]=%.2f, mse_buffer[1]=%.2f, mse_buffer[2]=%.2f, mse_buffer[3]=%.2f", 
+                      h_buf[0], h_buf[1], h_buf[2], h_buf[3]);
+            free(h_buf);
+        }
+    }
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
     DEBUG_STEP(3, "Transposing S matrix...");
