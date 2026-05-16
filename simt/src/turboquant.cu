@@ -10,31 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// --- FORENSICS MACRO ---
-#define FORENSIC_LOG(step_name, cuda_err) do { \
-    FILE *f_log = fopen("simt_forensics.log", "a"); \
-    if (f_log) { \
-        fprintf(f_log, "[FORENSICS] %s | Code: %d | Message: %s\n", \
-                step_name, cuda_err, cudaGetErrorString(cuda_err)); \
-        fclose(f_log); \
-    } \
-} while(0)
-// -----------------------
-
-
-#define CATCH_ASYNC_ERR(tag) do { \
-    cudaDeviceSynchronize(); \
-    cudaError_t e = cudaGetLastError(); \
-    if (e != cudaSuccess) { \
-        FILE *f_log = fopen("simt_async_forensics.log", "a"); \
-        if (f_log) { \
-            fprintf(f_log, "[FORENSICS] ASYNC TRAP: %s | Code: %d | Msg: %s\n", tag, e, cudaGetErrorString(e)); \
-            fclose(f_log); \
-        } \
-    } \
-} while(0)
-
-
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
         if ((*quantizer)) {
@@ -154,7 +129,6 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     if (dims == 0 || bit_width == 0)
         return QUANT_INIT_FAILED;
 
-    CATCH_ASYNC_ERR("INIT PHASE 0: Entry");
 
     *context = (turboquant_context_t*) malloc(sizeof(turboquant_context_t));
     if (*context == NULL)
@@ -171,7 +145,6 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
-    CATCH_ASYNC_ERR("INIT PHASE 1: After turboquant_quantizer_init");
 
     (*context)->mse_buffer = lin_alg_create_vector(dims);
     if ((*context)->mse_buffer == NULL) {
@@ -187,14 +160,12 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
-    CATCH_ASYNC_ERR("INIT PHASE 2: After lin_alg_create_vector");
 
     /* ----------- Byte Array Allocation on GPU and CPU ---------- */
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
     
     cudaError_t err_b = cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
-    FORENSIC_LOG("turboquant_init -> bstring mapping", err_b);
     
     (*context)->bstring_size = b_size;
     memset((*context)->h_bstring, 0, b_size);
@@ -205,14 +176,12 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocMapped);
     
     cudaError_t err_q = cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
-    FORENSIC_LOG("turboquant_init -> qjl mapping", err_q);
 
     (*context)->qjl_size = qjl_size;
     memset((*context)->h_qjl, 0, qjl_size);
     /* ---------------------------------------------------------- */
     
 
-    CATCH_ASYNC_ERR("INIT PHASE 3: After Host Mappings");
 
     cudaStream_t stream;
     if (cudaStreamCreate(&stream) != cudaSuccess) {
@@ -221,7 +190,6 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
-    CATCH_ASYNC_ERR("INIT PHASE 4: After Stream Create");
 
     (*context)->compute_stream = (void *)stream;
     if (lin_alg_set_stream((*context)->compute_stream) != SUCCESS) {
@@ -230,7 +198,6 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
-    CATCH_ASYNC_ERR("INIT PHASE 5: After lin_alg_set_stream");
  
     (*context)->is_init = 1;
     return QUANT_SUCCESS;
@@ -343,7 +310,6 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
             
             cudaError_t err_load_b1 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
-            FORENSIC_LOG("turboquant_init_load (realloc) -> bstring mapping", err_load_b1);
 
             context->bstring_size = b_size;
         }
@@ -351,7 +317,6 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
 
             cudaError_t err_load_b2 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
-            FORENSIC_LOG("turboquant_init_load (fresh) -> bstring mapping", err_load_b2);
 
             context->bstring_size = b_size;
     }
@@ -365,7 +330,6 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
             cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
 
             cudaError_t err_load_q1 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
-            FORENSIC_LOG("turboquant_init_load (realloc) -> qjl mapping", err_load_q1);
             
             context->qjl_size = qjl_size;
         }
@@ -373,7 +337,6 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
         
         cudaError_t err_load_q2 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
-        FORENSIC_LOG("turboquant_init_load (fresh) -> qjl mapping", err_load_q2);
 
         context->qjl_size = qjl_size;
     }
@@ -426,7 +389,6 @@ cleanup:
         lin_alg_free_vector(&context->y);
     }
 
-    CATCH_ASYNC_ERR("End of turboquant_init_load");
     return error_code;
 }
 
