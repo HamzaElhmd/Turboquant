@@ -10,6 +10,49 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* === DEBUG MACROS FOR NORM TRACING === */
+#define DEBUG_LOG_PATH "/tmp/turboquant_debug.log"
+static FILE* g_debug_log = NULL;
+static int g_debug_count = 0;
+
+#define DEBUG_INIT() do { \
+    if (g_debug_log == NULL) { \
+        g_debug_log = fopen(DEBUG_LOG_PATH, "w"); \
+        if (g_debug_log) { \
+            fprintf(g_debug_log, "=== TurboQuant Dequantization Debug ===\n"); \
+            fflush(g_debug_log); \
+        } \
+    } \
+} while(0)
+
+#define DEBUG_PRINT(fmt, ...) do { \
+    if (g_debug_log && g_debug_count <= 100) { \
+        fprintf(g_debug_log, fmt, ##__VA_ARGS__); \
+        fflush(g_debug_log); \
+    } \
+} while(0)
+
+#define DEBUG_START_CALL(dims, res_l2) do { \
+    g_debug_count++; \
+    DEBUG_PRINT("\n=== Call #%d ===\n", g_debug_count); \
+    DEBUG_PRINT("  dims=%zu, residual_l2=%.4f\n", (size_t)(dims), (float)(res_l2)); \
+} while(0)
+
+#define DEBUG_END_CALL() do { \
+    DEBUG_PRINT("  === End call #%d ===\n\n", g_debug_count); \
+} while(0)
+
+#define DEBUG_NORM(vec, n, label) do { \
+    float _sum_sq = 0.0f; \
+    for (int _i = 0; _i < (n); _i++) { _sum_sq += (vec)[_i] * (vec)[_i]; } \
+    DEBUG_PRINT("  [%s] norm=%.4f\n", label, sqrtf(_sum_sq)); \
+} while(0)
+
+#define DEBUG_STEP(step_id, fmt, ...) do { \
+    DEBUG_PRINT("  [STEP %d] " fmt "\n", step_id, ##__VA_ARGS__); \
+} while(0)
+/* === END DEBUG MACROS === */
+
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
         if ((*quantizer)) {
@@ -766,55 +809,69 @@ __global__ void turboquant_qjl_expand_kernel(const uint32_t* d_qjl, float* out, 
 }
 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res) {
+    DEBUG_INIT();
+    
     if (res == NULL || context == NULL || !context->is_init) return NULL;
 
     cudaStream_t stream = (cudaStream_t)context->compute_stream;
     const size_t d = context->mse_quantizer->dims;
+    
+    DEBUG_START_CALL(d, res->residual_l2);
 
     /* Step 1: Reconstruct the primary MSE component */
-    // Result is placed in context->y (rotated back to original space)
-    if (turboquant_mse_dequantization(context) == NULL) return NULL;
+    if (turboquant_mse_dequantization(context) == NULL) {
+        DEBUG_STEP(1, "FAILED: MSE dequantization");
+        return NULL;
+    }
+    cudaStreamSynchronize(stream);
+    DEBUG_NORM(context->y->vector, d, "STEP 1");
 
     /* Step 2: Reconstruct the residual component signs */
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
     
-    // Expand 1-bit signs from res->qjl into context->mse_buffer
-    // Note: res->qjl on CPU is mapped to context->d_qjl on GPU
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
         (uint32_t*)context->d_qjl, 
         context->mse_buffer->vector, 
         d
     );
+    cudaStreamSynchronize(stream);
+    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 2");
+    DEBUG_STEP(2, "Expected norm after QJL expand: %.4f", sqrtf((float)d));
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     
-    // We use context->mse_buffer as both input and workspace here 
-    // (Assuming your dot_product wrapper handles non-overlapping buffers)
-    // Residual = S^T * signs
     if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->mse_buffer) != SUCCESS) {
-        lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset on failure
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        DEBUG_STEP(3, "FAILED: lin_alg_dot_productmv (buffer aliasing!)");
         return NULL;
     }
-    lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset state
+    lin_alg_transpose_matrix(context->mse_quantizer->S);
+    cudaStreamSynchronize(stream);
+    
+    float _sum_sq = 0.0f;
+    for (int _i = 0; _i < (int)d; _i++) { _sum_sq += context->mse_buffer->vector[_i] * context->mse_buffer->vector[_i]; }
+    float _norm_step3 = sqrtf(_sum_sq);
+    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 3");
+    DEBUG_STEP(3, "RATIO step3/step2 = %.4f (expected ~1.0 if S is orthogonal)", _norm_step3 / sqrtf((float)d));
 
     /* Step 4: Apply scaling factor */
-    // Scale = (sqrt(pi/2) / d) * gamma
     float scale = (sqrtf(PI / 2.0f) / (float)d) * res->residual_l2;
+    DEBUG_STEP(4, "Scale = (sqrt(pi/2)/%zu) * %.4f = %.4f", d, res->residual_l2, scale);
     
-    // Perform: mse_buffer = scale * mse_buffer (Using GPU scaling)
     lin_alg_scale_vector(context->mse_buffer, scale);
+    cudaStreamSynchronize(stream);
+    DEBUG_NORM(context->mse_buffer->vector, d, "STEP 4");
 
     /* Step 5: Final Sum (x_mse + x_residual) */
-    // Perform: context->y = context->y + context->mse_buffer
-    // This is essentially a GPU axpy operation (1.0 * mse_buffer + y)
     if (lin_alg_add_vectors(context->y, context->mse_buffer) != SUCCESS) {
+        DEBUG_STEP(5, "FAILED: lin_alg_add_vectors");
         return NULL;
     }
-
-    // Final Sync to ensure context->y is ready for the RAG engine
     cudaStreamSynchronize(stream);
+    DEBUG_NORM(context->y->vector, d, "STEP 5 FINAL");
+    DEBUG_END_CALL();
 
     return context->y; 
 }
