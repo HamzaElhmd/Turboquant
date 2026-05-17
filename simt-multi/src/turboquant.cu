@@ -943,30 +943,11 @@ uint8_t turboquant_batch_init(turboquant_batch_context_t **batch_ctx, const size
     for (uint8_t i = 0; i < n_streams; i++) {
         uint8_t status = turboquant_init(&((*batch_ctx)->contexts[i]), dim, bit_width);
 
-        // --- THE C++ DEBUG TRAP ---
-        cudaError_t err = cudaGetLastError();
-        FILE *f_err = fopen("simt_multi_err.log", "a");
-        if (err != cudaSuccess || status != QUANT_SUCCESS) {
-            fprintf(f_err, "❌ [C++ FATAL] Stream %d failed to initialize!\n", i);
-            fprintf(f_err, "   CUDA Error: %s (Code: %d)\n", cudaGetErrorString(err), err);
-            fprintf(f_err, "   Status Code: %d\n", status);
-            fflush(f_err);
-            fclose(f_err);
-
-            // Clean up whatever managed to allocate before crashing
-            turboquant_batch_destroy(batch_ctx);
-            return QUANT_INIT_FAILED;
-        } else {
-            fprintf(f_err, "✅ [C++ DEBUG] Stream %d initialized successfully.\n", i);
-            fclose(f_err);
-        }
-        // --------------------------
-/*
         if (status != QUANT_SUCCESS) {
             turboquant_batch_destroy(batch_ctx);
             return QUANT_INIT_FAILED;
         }
-*/
+
     }
 
     (*batch_ctx)->is_init = 1;
