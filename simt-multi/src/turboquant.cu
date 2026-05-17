@@ -159,7 +159,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     }
 
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
-    cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
+    cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocDefault);
     if (cudaMalloc((void**)&(*context)->d_bstring, b_size) != cudaSuccess) {
         turboquant_clean(*context);
         free(*context);
@@ -169,7 +169,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     memset((*context)->h_bstring, 0, b_size);
 
     size_t qjl_size = ((dims + 31) / 32) * 4;
-    cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocMapped);
+    cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocDefault);
     cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
     (*context)->qjl_size = qjl_size;
     memset((*context)->h_qjl, 0, qjl_size);
@@ -297,12 +297,12 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
                 cudaFree(context->d_bstring);
                 context->d_bstring = NULL;
             }
-            cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
+            cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocDefault);
             if (cudaMalloc((void**)&context->d_bstring, b_size) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; }
             context->bstring_size = b_size;
         }
     } else {
-            cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
+            cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocDefault);
             if (cudaMalloc((void**)&context->d_bstring, b_size) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; }
             context->bstring_size = b_size;
     }
@@ -313,12 +313,12 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     if (context->h_qjl) {
         if (context->qjl_size != qjl_size) {
             cudaFreeHost(context->h_qjl);
-            cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
+            cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocDefault);
             cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
             context->qjl_size = qjl_size;
         }
     } else {
-        cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
+        cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocDefault);
         cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
         context->qjl_size = qjl_size;
     }
