@@ -129,6 +129,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     if (dims == 0 || bit_width == 0)
         return QUANT_INIT_FAILED;
 
+
     *context = (turboquant_context_t*) malloc(sizeof(turboquant_context_t));
     if (*context == NULL)
         return QUANT_INIT_FAILED;
@@ -144,6 +145,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+
     (*context)->mse_buffer = lin_alg_create_vector(dims);
     if ((*context)->mse_buffer == NULL) {
         turboquant_clean(*context);
@@ -158,17 +160,28 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+
+    /* ----------- Byte Array Allocation on GPU and CPU ---------- */
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    
+    cudaError_t err_b = cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    
     (*context)->bstring_size = b_size;
     memset((*context)->h_bstring, 0, b_size);
+    /* ---------------------------------------------------------- */
 
+    /* ----------- QJL Byte Array Allocation on GPU and CPU ---------- */
     size_t qjl_size = ((dims + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
+    
+    cudaError_t err_q = cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
+
     (*context)->qjl_size = qjl_size;
     memset((*context)->h_qjl, 0, qjl_size);
+    /* ---------------------------------------------------------- */
+    
+
 
     cudaStream_t stream;
     if (cudaStreamCreate(&stream) != cudaSuccess) {
@@ -177,6 +190,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+
     (*context)->compute_stream = (void *)stream;
     if (lin_alg_set_stream((*context)->compute_stream) != SUCCESS) {
         turboquant_clean(*context);
@@ -184,6 +198,7 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
         return QUANT_INIT_FAILED;
     }
 
+ 
     (*context)->is_init = 1;
     return QUANT_SUCCESS;
 }
@@ -274,7 +289,12 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     
     context->mse_quantizer->dims = dims;
     context->mse_quantizer->bit_width = bit_width;
-   
+
+    context->mse_quantizer->d_centroids = NULL;
+    context->mse_quantizer->book = NULL;
+    context->mse_quantizer->Π = NULL;
+    context->mse_quantizer->S = NULL;
+
     if (!context->compute_stream) {
         cudaStream_t stream;
         if (cudaStreamCreate(&stream) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; };
@@ -288,12 +308,16 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         if (context->bstring_size != b_size) {
             cudaFreeHost(context->h_bstring);
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            
+            cudaError_t err_load_b1 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+
             context->bstring_size = b_size;
         }
     } else {
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+
+            cudaError_t err_load_b2 = cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+
             context->bstring_size = b_size;
     }
 
@@ -304,12 +328,16 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
         if (context->qjl_size != qjl_size) {
             cudaFreeHost(context->h_qjl);
             cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+
+            cudaError_t err_load_q1 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+            
             context->qjl_size = qjl_size;
         }
     } else {
         cudaHostAlloc((void**)&context->h_qjl, qjl_size, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+        
+        cudaError_t err_load_q2 = cudaHostGetDevicePointer((void**)&context->d_qjl, (void*)context->h_qjl, 0);
+
         context->qjl_size = qjl_size;
     }
     memset(context->h_qjl, 0, qjl_size);
@@ -616,14 +644,32 @@ uint8_t turboquant_mse_quantization(turboquant_context_t *context, const vector_
     int threads = 128;
     int blocks = (context->mse_quantizer->dims + threads - 1) / threads;
 
+    // --- THE PCIe ATOMICS FIX ---
+    // Atomics over mapped host memory drop bits over the PCIe bus.
+    // We allocate a true VRAM buffer, do the atomics safely, and copy it back.
+    uint8_t* vram_bstring;
+    if (cudaMalloc(&vram_bstring, context->bstring_size) != cudaSuccess)
+        return QUANT_MSE_FAILED;
+
+    // Zero out the VRAM buffer before bitwise ORs
+    cudaMemsetAsync(vram_bstring, 0, context->bstring_size, (cudaStream_t)context->compute_stream);
+    
     turbo_quant_fused_kernel<<<blocks, threads, 0, (cudaStream_t)context->compute_stream>>>(
         context->y->vector,
         context->mse_quantizer->d_centroids, // Flattened centroids from your Lloyd-Max
         context->mse_quantizer->book->n_centroids,
         context->mse_quantizer->bit_width,
         context->mse_quantizer->dims,
-        context->d_bstring // GPU writes directly to your CPU memory here
+        vram_bstring // GPU writes directly to your CPU memory here
     );
+
+    // Safely copy the packed bits back across the PCIe bus to the host memory
+    cudaMemcpyAsync(context->h_bstring, vram_bstring, context->bstring_size, cudaMemcpyDeviceToHost, (cudaStream_t)context->compute_stream);
+
+    // Synchronize and free
+    cudaStreamSynchronize((cudaStream_t)context->compute_stream);
+    cudaFree(vram_bstring);
+    // -----------------------------
 
     return QUANT_SUCCESS;
 }
@@ -740,52 +786,79 @@ __global__ void turboquant_qjl_expand_kernel(const uint32_t* d_qjl, float* out, 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res) {
     if (res == NULL || context == NULL || !context->is_init) return NULL;
 
-    cudaStream_t stream = (cudaStream_t)context->compute_stream;
     const size_t d = context->mse_quantizer->dims;
 
+    // --- THE FINAL AMNESIA FIX ---
+    // Safely copy the CPU bits to the Zero-Copy mapped buffers 
+    // BEFORE the GPU kernels are launched!
+    size_t b_bytes = ((d * context->mse_quantizer->bit_width + 31) / 32) * 4;
+    size_t qjl_bytes = ((d + 31) / 32) * 4;
+
+    // Use cudaMemcpy to handle both host and device source pointers
+    if (res->bstring != NULL && context->h_bstring != NULL) {
+        cudaMemcpy(context->h_bstring, res->bstring, b_bytes, cudaMemcpyDefault);
+    }
+    if (res->qjl != NULL && context->h_qjl != NULL) {
+        cudaMemcpy(context->h_qjl, res->qjl, qjl_bytes, cudaMemcpyDefault);
+    }
+    // -----------------------------
+
+    cudaStream_t stream = (cudaStream_t)context->compute_stream;
+
     /* Step 1: Reconstruct the primary MSE component */
-    // Result is placed in context->y (rotated back to original space)
-    if (turboquant_mse_dequantization(context) == NULL) return NULL;
+    if (turboquant_mse_dequantization(context) == NULL) {
+        return NULL;
+    }
+    cudaStreamSynchronize(stream);
 
     /* Step 2: Reconstruct the residual component signs */
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
     
-    // Expand 1-bit signs from res->qjl into context->mse_buffer
-    // Note: res->qjl on CPU is mapped to context->d_qjl on GPU
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
         (uint32_t*)context->d_qjl, 
         context->mse_buffer->vector, 
         d
     );
+    cudaStreamSynchronize(stream);
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
     lin_alg_transpose_matrix(context->mse_quantizer->S);
     
-    // We use context->mse_buffer as both input and workspace here 
-    // (Assuming your dot_product wrapper handles non-overlapping buffers)
-    // Residual = S^T * signs
-    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->mse_buffer) != SUCCESS) {
-        lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset on failure
+    /* Allocate temporary vector for output (avoid buffer aliasing) */
+    vector_t *temp_output = lin_alg_create_vector(d);
+    if (temp_output == NULL) {
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
     }
-    lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset state
+    
+    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, temp_output) != SUCCESS) {
+        lin_alg_free_vector(&temp_output);
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        return NULL;
+    }
+    cudaStreamSynchronize(stream);
+    
+    /* Copy result back to mse_buffer */
+    if (lin_alg_copy_vector(context->mse_buffer, temp_output) != SUCCESS) {
+        lin_alg_free_vector(&temp_output);
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        return NULL;
+    }
+    
+    lin_alg_free_vector(&temp_output);
+    lin_alg_transpose_matrix(context->mse_quantizer->S);
 
     /* Step 4: Apply scaling factor */
-    // Scale = (sqrt(pi/2) / d) * gamma
     float scale = (sqrtf(PI / 2.0f) / (float)d) * res->residual_l2;
     
-    // Perform: mse_buffer = scale * mse_buffer (Using GPU scaling)
     lin_alg_scale_vector(context->mse_buffer, scale);
+    cudaStreamSynchronize(stream);
 
     /* Step 5: Final Sum (x_mse + x_residual) */
-    // Perform: context->y = context->y + context->mse_buffer
-    // This is essentially a GPU axpy operation (1.0 * mse_buffer + y)
     if (lin_alg_add_vectors(context->y, context->mse_buffer) != SUCCESS) {
         return NULL;
     }
-
-    // Final Sync to ensure context->y is ready for the RAG engine
     cudaStreamSynchronize(stream);
 
     return context->y; 
