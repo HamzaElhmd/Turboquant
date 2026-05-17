@@ -838,19 +838,20 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     DEBUG_PRINT("DEBUG: res->bstring=%p, context->h_bstring=%p\n", res->bstring, context->h_bstring);
     DEBUG_PRINT("DEBUG: res->qjl=%p, context->h_qjl=%p\n", res->qjl, context->h_qjl);
 
+    // Use cudaMemcpy to handle both host and device source pointers
     if (res->bstring != NULL && context->h_bstring != NULL) {
-        DEBUG_PRINT("DEBUG: About to memcpy bstring...\n");
-        memcpy(context->h_bstring, res->bstring, b_bytes);
-        DEBUG_PRINT("DEBUG: bstring memcpy DONE\n");
+        DEBUG_PRINT("DEBUG: About to cudaMemcpy bstring...\n");
+        cudaMemcpy(context->h_bstring, res->bstring, b_bytes, cudaMemcpyDefault);
+        DEBUG_PRINT("DEBUG: bstring cudaMemcpy DONE\n");
     } else {
-        DEBUG_PRINT("DEBUG: SKIPPING bstring memcpy (NULL pointer)\n");
+        DEBUG_PRINT("DEBUG: SKIPPING bstring copy (NULL pointer)\n");
     }
     if (res->qjl != NULL && context->h_qjl != NULL) {
-        DEBUG_PRINT("DEBUG: About to memcpy qjl...\n");
-        memcpy(context->h_qjl, res->qjl, qjl_bytes);
-        DEBUG_PRINT("DEBUG: qjl memcpy DONE\n");
+        DEBUG_PRINT("DEBUG: About to cudaMemcpy qjl...\n");
+        cudaMemcpy(context->h_qjl, res->qjl, qjl_bytes, cudaMemcpyDefault);
+        DEBUG_PRINT("DEBUG: qjl cudaMemcpy DONE\n");
     } else {
-        DEBUG_PRINT("DEBUG: SKIPPING qjl memcpy (NULL pointer)\n");
+        DEBUG_PRINT("DEBUG: SKIPPING qjl copy (NULL pointer)\n");
     }
     DEBUG_PRINT("DEBUG: All memcpys complete, continuing...\n");
     // -----------------------------
