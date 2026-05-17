@@ -10,50 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* === DEBUG MACROS FOR NORM TRACING === */
-/* NOTE: These macros do NOT access GPU memory directly (would segfault).
- * They log control flow and expected values only.
- */
-#define DEBUG_LOG_PATH "/tmp/turboquant_debug.log"
-static FILE* g_debug_log = NULL;
-static int g_debug_count = 0;
-
-#define DEBUG_INIT() do { \
-    if (g_debug_log == NULL) { \
-        g_debug_log = fopen(DEBUG_LOG_PATH, "w"); \
-        if (g_debug_log) { \
-            fprintf(g_debug_log, "=== TurboQuant Dequantization Debug ===\n"); \
-            fflush(g_debug_log); \
-        } \
-    } \
-} while(0)
-
-#define DEBUG_PRINT(fmt, ...) do { \
-    if (g_debug_log && g_debug_count <= 100) { \
-        fprintf(g_debug_log, fmt, ##__VA_ARGS__); \
-        fflush(g_debug_log); \
-    } \
-} while(0)
-
-#define DEBUG_START_CALL(dims, res_l2) do { \
-    g_debug_count++; \
-    DEBUG_PRINT("\n=== Call #%d ===\n", g_debug_count); \
-    DEBUG_PRINT("  dims=%zu, residual_l2=%.4f\n", (size_t)(dims), (float)(res_l2)); \
-} while(0)
-
-#define DEBUG_END_CALL() do { \
-    DEBUG_PRINT("  === End call #%d ===\n\n", g_debug_count); \
-} while(0)
-
-#define DEBUG_STEP(step_id, fmt, ...) do { \
-    DEBUG_PRINT("  [STEP %d] " fmt "\n", step_id, ##__VA_ARGS__); \
-} while(0)
-
-#define DEBUG_CHECKPOINT(label) do { \
-    DEBUG_PRINT("  [CHECKPOINT %s] Reached line %d\n", label, __LINE__); \
-} while(0)
-/* === END DEBUG MACROS === */
-
 void turboquant_quantizer_destroy(turbo_quantizer **quantizer) {
     if (quantizer) {
         if ((*quantizer)) {
@@ -688,14 +644,32 @@ uint8_t turboquant_mse_quantization(turboquant_context_t *context, const vector_
     int threads = 128;
     int blocks = (context->mse_quantizer->dims + threads - 1) / threads;
 
+    // --- THE PCIe ATOMICS FIX ---
+    // Atomics over mapped host memory drop bits over the PCIe bus.
+    // We allocate a true VRAM buffer, do the atomics safely, and copy it back.
+    uint8_t* vram_bstring;
+    if (cudaMalloc(&vram_bstring, context->bstring_size) != cudaSuccess)
+        return QUANT_MSE_FAILED;
+
+    // Zero out the VRAM buffer before bitwise ORs
+    cudaMemsetAsync(vram_bstring, 0, context->bstring_size, (cudaStream_t)context->compute_stream);
+    
     turbo_quant_fused_kernel<<<blocks, threads, 0, (cudaStream_t)context->compute_stream>>>(
         context->y->vector,
         context->mse_quantizer->d_centroids, // Flattened centroids from your Lloyd-Max
         context->mse_quantizer->book->n_centroids,
         context->mse_quantizer->bit_width,
         context->mse_quantizer->dims,
-        context->d_bstring // GPU writes directly to your CPU memory here
+        vram_bstring // GPU writes directly to your CPU memory here
     );
+
+    // Safely copy the packed bits back across the PCIe bus to the host memory
+    cudaMemcpyAsync(context->h_bstring, vram_bstring, context->bstring_size, cudaMemcpyDeviceToHost, (cudaStream_t)context->compute_stream);
+
+    // Synchronize and free
+    cudaStreamSynchronize((cudaStream_t)context->compute_stream);
+    cudaFree(vram_bstring);
+    // -----------------------------
 
     return QUANT_SUCCESS;
 }
@@ -810,194 +784,82 @@ __global__ void turboquant_qjl_expand_kernel(const uint32_t* d_qjl, float* out, 
 }
 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res) {
-    DEBUG_INIT();
-    DEBUG_PRINT("DEBUG: Entered function\n");
-    
-    if (res == NULL || context == NULL || !context->is_init) {
-        DEBUG_PRINT("DEBUG: Early return - res=%p context=%p is_init=%d\n", res, context, context ? context->is_init : -1);
-        return NULL;
-    }
-    DEBUG_PRINT("DEBUG: Passed NULL checks\n");
-    
-    /* Check that mse_quantizer is valid */
-    if (context->mse_quantizer == NULL) {
-        DEBUG_PRINT("DEBUG: ERROR - mse_quantizer is NULL\n");
-        return NULL;
-    }
-    DEBUG_PRINT("DEBUG: mse_quantizer OK, getting dims...\n");
+    if (res == NULL || context == NULL || !context->is_init) return NULL;
 
     const size_t d = context->mse_quantizer->dims;
-    DEBUG_PRINT("DEBUG: dims=%zu\n", d);
 
     // --- THE FINAL AMNESIA FIX ---
     // Safely copy the CPU bits to the Zero-Copy mapped buffers 
     // BEFORE the GPU kernels are launched!
     size_t b_bytes = ((d * context->mse_quantizer->bit_width + 31) / 32) * 4;
     size_t qjl_bytes = ((d + 31) / 32) * 4;
-    DEBUG_PRINT("DEBUG: b_bytes=%zu, qjl_bytes=%zu\n", b_bytes, qjl_bytes);
-    DEBUG_PRINT("DEBUG: res->bstring=%p, context->h_bstring=%p\n", res->bstring, context->h_bstring);
-    DEBUG_PRINT("DEBUG: res->qjl=%p, context->h_qjl=%p\n", res->qjl, context->h_qjl);
 
     // Use cudaMemcpy to handle both host and device source pointers
     if (res->bstring != NULL && context->h_bstring != NULL) {
-        DEBUG_PRINT("DEBUG: About to cudaMemcpy bstring...\n");
         cudaMemcpy(context->h_bstring, res->bstring, b_bytes, cudaMemcpyDefault);
-        DEBUG_PRINT("DEBUG: bstring cudaMemcpy DONE\n");
-    } else {
-        DEBUG_PRINT("DEBUG: SKIPPING bstring copy (NULL pointer)\n");
     }
     if (res->qjl != NULL && context->h_qjl != NULL) {
-        DEBUG_PRINT("DEBUG: About to cudaMemcpy qjl...\n");
         cudaMemcpy(context->h_qjl, res->qjl, qjl_bytes, cudaMemcpyDefault);
-        DEBUG_PRINT("DEBUG: qjl cudaMemcpy DONE\n");
-    } else {
-        DEBUG_PRINT("DEBUG: SKIPPING qjl copy (NULL pointer)\n");
     }
-    DEBUG_PRINT("DEBUG: All memcpys complete, continuing...\n");
     // -----------------------------
 
     cudaStream_t stream = (cudaStream_t)context->compute_stream;
-    DEBUG_START_CALL(d, res->residual_l2);
 
     /* Step 1: Reconstruct the primary MSE component */
-    DEBUG_STEP(1, "Calling turboquant_mse_dequantization...");
     if (turboquant_mse_dequantization(context) == NULL) {
-        DEBUG_STEP(1, "FAILED: MSE dequantization");
         return NULL;
     }
     cudaStreamSynchronize(stream);
-    DEBUG_CHECKPOINT("STEP 1 DONE");
 
     /* Step 2: Reconstruct the residual component signs */
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
     
-    DEBUG_STEP(2, "Launching turboquant_qjl_expand_kernel (threads=%d, blocks=%d)", threads, blocks);
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
         (uint32_t*)context->d_qjl, 
         context->mse_buffer->vector, 
         d
     );
-    DEBUG_CHECKPOINT("STEP 2 KERNEL LAUNCHED");
     cudaStreamSynchronize(stream);
-    DEBUG_CHECKPOINT("STEP 2 DONE");
-    DEBUG_STEP(2, "Expected norm after QJL expand: sqrt(d)=%.4f", sqrtf((float)d));
-    
-    /* DEBUG: Verify mse_buffer norm BEFORE dot product */
-    {
-        float *h_buf = (float*)malloc(d * sizeof(float));
-        if (h_buf) {
-            cudaMemcpy(h_buf, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
-            float sum_sq = 0.0f;
-            for (int i = 0; i < (int)d; i++) sum_sq += h_buf[i] * h_buf[i];
-            float buf_norm = sqrtf(sum_sq);
-            DEBUG_STEP(2, "mse_buffer norm BEFORE dot_productmv: %.4f (expected ~11.31)", buf_norm);
-            DEBUG_STEP(2, "mse_buffer[0]=%.2f, mse_buffer[1]=%.2f, mse_buffer[2]=%.2f, mse_buffer[3]=%.2f", 
-                      h_buf[0], h_buf[1], h_buf[2], h_buf[3]);
-            free(h_buf);
-        }
-    }
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
-    DEBUG_STEP(3, "Transposing S matrix...");
     lin_alg_transpose_matrix(context->mse_quantizer->S);
-    
-    /* DEBUG: Verify S matrix row norm */
-    {
-        float *h_row = (float*)malloc(d * sizeof(float));
-        if (h_row) {
-            // Copy first row of S to host
-            cudaMemcpy(h_row, (float*)context->mse_quantizer->S->matrix, d * sizeof(float), cudaMemcpyDeviceToHost);
-            float sum_sq = 0.0f;
-            for (int i = 0; i < (int)d; i++) sum_sq += h_row[i] * h_row[i];
-            float row_norm = sqrtf(sum_sq);
-            
-            // Check a few values
-            DEBUG_STEP(3, "S matrix row[0] norm=%.4f (expected ~11.31 for N(0,1))", row_norm);
-            DEBUG_STEP(3, "S[0,0]=%.4f, S[0,1]=%.4f, S[0,2]=%.4f", h_row[0], h_row[1], h_row[2]);
-            
-            // Compute Frobenius norm of S
-            float frob_sq = 0.0f;
-            for (int i = 0; i < 5; i++) {  // Check first 5 rows
-                cudaMemcpy(h_row, (float*)context->mse_quantizer->S->matrix + i * context->mse_quantizer->S->stride, 
-                          d * sizeof(float), cudaMemcpyDeviceToHost);
-                for (int j = 0; j < (int)d; j++) frob_sq += h_row[j] * h_row[j];
-            }
-            DEBUG_STEP(3, "S Frobenius norm (first 5 rows)=%.4f", sqrtf(frob_sq));
-            free(h_row);
-        }
-    }
     
     /* Allocate temporary vector for output (avoid buffer aliasing) */
     vector_t *temp_output = lin_alg_create_vector(d);
     if (temp_output == NULL) {
-        DEBUG_STEP(3, "FAILED: Could not allocate temporary vector");
         lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
     }
     
-    DEBUG_STEP(3, "Calling lin_alg_dot_productmv(S^T, mse_buffer, temp_output) - NO ALIASING");
     if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, temp_output) != SUCCESS) {
-        DEBUG_STEP(3, "FAILED: lin_alg_dot_productmv");
         lin_alg_free_vector(&temp_output);
         lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
     }
     cudaStreamSynchronize(stream);
     
-    /* DEBUG: Verify norms after dot product */
-    float *h_temp = (float*)malloc(d * sizeof(float));
-    if (h_temp) {
-        cudaMemcpy(h_temp, temp_output->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
-        float sum_sq = 0.0f;
-        for (int i = 0; i < (int)d; i++) sum_sq += h_temp[i] * h_temp[i];
-        float norm_temp = sqrtf(sum_sq);
-        DEBUG_STEP(3, "AFTER dot_productmv to temp_output: norm=%.4f (expected ~11.31)", norm_temp);
-        free(h_temp);
-    }
-    
     /* Copy result back to mse_buffer */
-    DEBUG_STEP(3, "Copying temp_output -> mse_buffer...");
     if (lin_alg_copy_vector(context->mse_buffer, temp_output) != SUCCESS) {
-        DEBUG_STEP(3, "FAILED: lin_alg_copy_vector");
         lin_alg_free_vector(&temp_output);
         lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
-    }
-    
-    /* DEBUG: Verify norms after copy */
-    h_temp = (float*)malloc(d * sizeof(float));
-    if (h_temp) {
-        cudaMemcpy(h_temp, context->mse_buffer->vector, d * sizeof(float), cudaMemcpyDeviceToHost);
-        float sum_sq = 0.0f;
-        for (int i = 0; i < (int)d; i++) sum_sq += h_temp[i] * h_temp[i];
-        float norm_mse = sqrtf(sum_sq);
-        DEBUG_STEP(3, "AFTER copy to mse_buffer: norm=%.4f", norm_mse);
-        free(h_temp);
     }
     
     lin_alg_free_vector(&temp_output);
     lin_alg_transpose_matrix(context->mse_quantizer->S);
-    DEBUG_CHECKPOINT("STEP 3 DONE (buffer aliasing fixed)");
 
     /* Step 4: Apply scaling factor */
     float scale = (sqrtf(PI / 2.0f) / (float)d) * res->residual_l2;
-    DEBUG_STEP(4, "Scale = (sqrt(pi/2)/%zu) * %.4f = %.4f", d, res->residual_l2, scale);
     
-    DEBUG_STEP(4, "Calling lin_alg_scale_vector...");
     lin_alg_scale_vector(context->mse_buffer, scale);
     cudaStreamSynchronize(stream);
-    DEBUG_CHECKPOINT("STEP 4 DONE");
 
     /* Step 5: Final Sum (x_mse + x_residual) */
-    DEBUG_STEP(5, "Calling lin_alg_add_vectors(y, mse_buffer)...");
     if (lin_alg_add_vectors(context->y, context->mse_buffer) != SUCCESS) {
-        DEBUG_STEP(5, "FAILED: lin_alg_add_vectors");
         return NULL;
     }
     cudaStreamSynchronize(stream);
-    DEBUG_CHECKPOINT("STEP 5 DONE");
-    DEBUG_END_CALL();
 
     return context->y; 
 }
