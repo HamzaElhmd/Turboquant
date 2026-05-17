@@ -811,16 +811,23 @@ __global__ void turboquant_qjl_expand_kernel(const uint32_t* d_qjl, float* out, 
 
 vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const quantization_result *res) {
     DEBUG_INIT();
+    DEBUG_PRINT("DEBUG: Entered function\n");
     
-    if (res == NULL || context == NULL || !context->is_init) return NULL;
+    if (res == NULL || context == NULL || !context->is_init) {
+        DEBUG_PRINT("DEBUG: Early return - res=%p context=%p is_init=%d\n", res, context, context ? context->is_init : -1);
+        return NULL;
+    }
+    DEBUG_PRINT("DEBUG: Passed NULL checks\n");
     
     /* Check that mse_quantizer is valid */
     if (context->mse_quantizer == NULL) {
-        DEBUG_STEP(0, "ERROR: context->mse_quantizer is NULL");
+        DEBUG_PRINT("DEBUG: ERROR - mse_quantizer is NULL\n");
         return NULL;
     }
+    DEBUG_PRINT("DEBUG: mse_quantizer OK, getting dims...\n");
 
     const size_t d = context->mse_quantizer->dims;
+    DEBUG_PRINT("DEBUG: dims=%zu\n", d);
 
     // --- THE FINAL AMNESIA FIX ---
     // Safely copy the CPU bits to the Zero-Copy mapped buffers 
