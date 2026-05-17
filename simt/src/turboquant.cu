@@ -832,6 +832,27 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
     
+    /* Copy historical qjl signs from res to context buffer (BUG: was missing!) */
+    size_t qjl_bytes = ((d + 31) / 32) * 4;
+    DEBUG_STEP(2, "Copying res->qjl (%p) to context->h_qjl (%p), %zu bytes", 
+              res->qjl, context->h_qjl, qjl_bytes);
+    if (res->qjl && context->h_qjl) {
+        /* DEBUG: Print first 8 bytes of res->qjl before copy */
+        uint8_t *qjl_debug = (uint8_t*)res->qjl;
+        DEBUG_STEP(2, "res->qjl first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                  qjl_debug[0], qjl_debug[1], qjl_debug[2], qjl_debug[3],
+                  qjl_debug[4], qjl_debug[5], qjl_debug[6], qjl_debug[7]);
+        memcpy(context->h_qjl, res->qjl, qjl_bytes);
+        DEBUG_STEP(2, "qjl copy complete");
+        /* DEBUG: Print first 8 bytes of context->h_qjl after copy */
+        qjl_debug = (uint8_t*)context->h_qjl;
+        DEBUG_STEP(2, "context->h_qjl first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                  qjl_debug[0], qjl_debug[1], qjl_debug[2], qjl_debug[3],
+                  qjl_debug[4], qjl_debug[5], qjl_debug[6], qjl_debug[7]);
+    } else {
+        DEBUG_STEP(2, "WARNING: res->qjl=%p, context->h_qjl=%p", res->qjl, context->h_qjl);
+    }
+    
     DEBUG_STEP(2, "Launching turboquant_qjl_expand_kernel (threads=%d, blocks=%d)", threads, blocks);
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
         (uint32_t*)context->d_qjl, 
