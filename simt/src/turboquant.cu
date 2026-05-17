@@ -834,13 +834,25 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     // BEFORE the GPU kernels are launched!
     size_t b_bytes = ((d * context->mse_quantizer->bit_width + 31) / 32) * 4;
     size_t qjl_bytes = ((d + 31) / 32) * 4;
+    DEBUG_PRINT("DEBUG: b_bytes=%zu, qjl_bytes=%zu\n", b_bytes, qjl_bytes);
+    DEBUG_PRINT("DEBUG: res->bstring=%p, context->h_bstring=%p\n", res->bstring, context->h_bstring);
+    DEBUG_PRINT("DEBUG: res->qjl=%p, context->h_qjl=%p\n", res->qjl, context->h_qjl);
 
     if (res->bstring != NULL && context->h_bstring != NULL) {
+        DEBUG_PRINT("DEBUG: About to memcpy bstring...\n");
         memcpy(context->h_bstring, res->bstring, b_bytes);
+        DEBUG_PRINT("DEBUG: bstring memcpy DONE\n");
+    } else {
+        DEBUG_PRINT("DEBUG: SKIPPING bstring memcpy (NULL pointer)\n");
     }
     if (res->qjl != NULL && context->h_qjl != NULL) {
+        DEBUG_PRINT("DEBUG: About to memcpy qjl...\n");
         memcpy(context->h_qjl, res->qjl, qjl_bytes);
+        DEBUG_PRINT("DEBUG: qjl memcpy DONE\n");
+    } else {
+        DEBUG_PRINT("DEBUG: SKIPPING qjl memcpy (NULL pointer)\n");
     }
+    DEBUG_PRINT("DEBUG: All memcpys complete, continuing...\n");
     // -----------------------------
 
     cudaStream_t stream = (cudaStream_t)context->compute_stream;
