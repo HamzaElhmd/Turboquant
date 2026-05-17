@@ -820,9 +820,23 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
         return NULL;
     }
 
-    cudaStream_t stream = (cudaStream_t)context->compute_stream;
     const size_t d = context->mse_quantizer->dims;
-    
+
+    // --- THE FINAL AMNESIA FIX ---
+    // Safely copy the CPU bits to the Zero-Copy mapped buffers 
+    // BEFORE the GPU kernels are launched!
+    size_t b_bytes = ((d * context->mse_quantizer->bit_width + 31) / 32) * 4;
+    size_t qjl_bytes = ((d + 31) / 32) * 4;
+
+    if (res->bstring != NULL && context->h_bstring != NULL) {
+        memcpy(context->h_bstring, res->bstring, b_bytes);
+    }
+    if (res->qjl != NULL && context->h_qjl != NULL) {
+        memcpy(context->h_qjl, res->qjl, qjl_bytes);
+    }
+    // -----------------------------
+
+    cudaStream_t stream = (cudaStream_t)context->compute_stream;
     DEBUG_START_CALL(d, res->residual_l2);
 
     /* Step 1: Reconstruct the primary MSE component */
@@ -837,21 +851,6 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
     /* Step 2: Reconstruct the residual component signs */
     int threads = 128;
     int blocks = (d + threads - 1) / threads;
-    
-    /* Copy historical qjl signs from res to context buffer (BUG: was missing!) */
-    size_t qjl_bytes = ((d + 31) / 32) * 4;
-    DEBUG_STEP(2, "Copying res->qjl (%p) to context->h_qjl (%p), %zu bytes", 
-              res->qjl, context->h_qjl, qjl_bytes);
-    /* Copy historical qjl signs from res to context buffer */
-    DEBUG_STEP(2, "Checking qjl: res->qjl=%p, context->h_qjl=%p", res->qjl, context->h_qjl);
-    if (res->qjl != NULL && context->h_qjl != NULL) {
-        DEBUG_STEP(2, "Copying %zu bytes of qjl data...", qjl_bytes);
-        memcpy(context->h_qjl, res->qjl, qjl_bytes);
-        DEBUG_STEP(2, "qjl copy complete");
-    } else {
-        DEBUG_STEP(2, "ERROR: Cannot copy qjl - res->qjl=%p, context->h_qjl=%p", res->qjl, context->h_qjl);
-        return NULL;
-    }
     
     DEBUG_STEP(2, "Launching turboquant_qjl_expand_kernel (threads=%d, blocks=%d)", threads, blocks);
     turboquant_qjl_expand_kernel<<<blocks, threads, 0, stream>>>(
