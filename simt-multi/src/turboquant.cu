@@ -160,7 +160,11 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
 
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
     cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    if (cudaMalloc((void**)&(*context)->d_bstring, b_size) != cudaSuccess) {
+        turboquant_clean(*context);
+        free(*context);
+        return QUANT_INIT_FAILED;
+    }
     (*context)->bstring_size = b_size;
     memset((*context)->h_bstring, 0, b_size);
 
@@ -218,11 +222,13 @@ void turboquant_clean(turboquant_context_t *context) {
         context->compute_stream = NULL;
     }
 
-    // 2. Clean the Zero-Copy bstring
+    // 2. Clean the bstring buffers
     if (context->h_bstring != NULL) {
-        // This one call cleans up both h_bstring AND the d_bstring mapping
         cudaFreeHost(context->h_bstring);
         context->h_bstring = NULL;
+    }
+    if (context->d_bstring != NULL) {
+        cudaFree(context->d_bstring);
         context->d_bstring = NULL;
     }
 
@@ -287,13 +293,17 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     if (context->h_bstring) {
         if (context->bstring_size != b_size) {
             cudaFreeHost(context->h_bstring);
+            if (context->d_bstring) {
+                cudaFree(context->d_bstring);
+                context->d_bstring = NULL;
+            }
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            if (cudaMalloc((void**)&context->d_bstring, b_size) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; }
             context->bstring_size = b_size;
         }
     } else {
             cudaHostAlloc((void**)&context->h_bstring, b_size, cudaHostAllocMapped);
-            cudaHostGetDevicePointer((void**)&context->d_bstring, (void*)context->h_bstring, 0);
+            if (cudaMalloc((void**)&context->d_bstring, b_size) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; }
             context->bstring_size = b_size;
     }
 
@@ -615,16 +625,18 @@ uint8_t turboquant_mse_quantization(turboquant_context_t *context, const vector_
 
     int threads = 128;
     int blocks = (context->mse_quantizer->dims + threads - 1) / threads;
+    cudaMemsetAsync(context->d_bstring, 0, context->bstring_size, (cudaStream_t)context->compute_stream);
 
     turbo_quant_fused_kernel<<<blocks, threads, 0, (cudaStream_t)context->compute_stream>>>(
         context->y->vector,
-        context->mse_quantizer->d_centroids, // Flattened centroids from your Lloyd-Max
+        context->mse_quantizer->d_centroids,
         context->mse_quantizer->book->n_centroids,
         context->mse_quantizer->bit_width,
         context->mse_quantizer->dims,
-        context->d_bstring // GPU writes directly to your CPU memory here
+        context->d_bstring
     );
 
+    cudaMemcpyAsync(context->h_bstring, context->d_bstring, context->bstring_size, cudaMemcpyDeviceToHost, (cudaStream_t)context->compute_stream);
     return QUANT_SUCCESS;
 }
 
@@ -764,15 +776,22 @@ vector_t* turboquant_prod_dequantization(turboquant_context_t *context, const qu
 
     /* Step 3: Apply inverse rotation S^T to the residual signs */
     lin_alg_transpose_matrix(context->mse_quantizer->S);
-    
-    // We use context->mse_buffer as both input and workspace here 
-    // (Assuming your dot_product wrapper handles non-overlapping buffers)
-    // Residual = S^T * signs
-    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, context->mse_buffer) != SUCCESS) {
-        lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset on failure
+
+    vector_t *temp_output = lin_alg_create_vector(d);
+    if (temp_output == NULL) {
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
         return NULL;
     }
-    lin_alg_transpose_matrix(context->mse_quantizer->S); // Reset state
+
+    if (lin_alg_dot_productmv(context->mse_quantizer->S, context->mse_buffer, temp_output) != SUCCESS) {
+        lin_alg_free_vector(&temp_output);
+        lin_alg_transpose_matrix(context->mse_quantizer->S);
+        return NULL;
+    }
+
+    lin_alg_copy_vector(context->mse_buffer, temp_output);
+    lin_alg_free_vector(&temp_output);
+    lin_alg_transpose_matrix(context->mse_quantizer->S);
 
     /* Step 4: Apply scaling factor */
     // Scale = (sqrt(pi/2) / d) * gamma
