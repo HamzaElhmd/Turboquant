@@ -159,14 +159,18 @@ uint8_t turboquant_init(turboquant_context_t **context, const size_t dims,
     }
 
     size_t b_size = ((dims * bit_width + 31) / 32) * 4;
+    
     cudaHostAlloc((void**)&(*context)->h_bstring, b_size, cudaHostAllocMapped);
     cudaHostGetDevicePointer((void**)&(*context)->d_bstring, (void*)(*context)->h_bstring, 0);
+    
     (*context)->bstring_size = b_size;
     memset((*context)->h_bstring, 0, b_size);
 
     size_t qjl_size = ((dims + 31) / 32) * 4;
+    
     cudaHostAlloc((void**)&(*context)->h_qjl, qjl_size, cudaHostAllocMapped);
     cudaHostGetDevicePointer((void**)&(*context)->d_qjl, (void*)(*context)->h_qjl, 0);
+    
     (*context)->qjl_size = qjl_size;
     memset((*context)->h_qjl, 0, qjl_size);
 
@@ -260,6 +264,7 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     if (context->mse_buffer && context->mse_buffer->n != dims) {
         lin_alg_free_vector(&context->mse_buffer);
     }
+    
     // Allocate container
     if (!context->mse_buffer) {
         context->mse_buffer = lin_alg_create_vector(dims);
@@ -274,6 +279,11 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     
     context->mse_quantizer->dims = dims;
     context->mse_quantizer->bit_width = bit_width;
+    
+    context->mse_quantizer->d_centroids = NULL;
+    context->mse_quantizer->book = NULL;
+    context->mse_quantizer->Π = NULL;
+    context->mse_quantizer->S = NULL;
    
     if (!context->compute_stream) {
         cudaStream_t stream;
@@ -336,6 +346,7 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     // Load Matrix Π
     for (size_t i = 0; i < dims; i++) {
         if (fread(row_buffer, sizeof(float), saved_stride, f) != saved_stride) { error_code = QUANT_INIT_FAILED; goto cleanup; }
+
         // Copy only the valid data (dims) to the GPU at the current stride offset
         if (cudaMemcpy((float*)context->mse_quantizer->Π->matrix + (i * context->mse_quantizer->Π->stride), 
                    row_buffer, dims * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) { error_code = QUANT_INIT_FAILED; goto cleanup; }
@@ -344,10 +355,10 @@ uint8_t turboquant_init_load(turboquant_context_t *context, const char *filename
     // Load Matrix S (using the same logic)
     for (size_t i = 0; i < dims; i++) {
         if (fread(row_buffer, sizeof(float), saved_stride, f) != saved_stride) { error_code = QUANT_INIT_FAILED; goto cleanup; }
+   
         if (cudaMemcpy((float*)context->mse_quantizer->S->matrix + (i * context->mse_quantizer->S->stride), 
                    row_buffer, dims * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {error_code = QUANT_INIT_FAILED; goto cleanup; }
     }
-
 
 cleanup:
     if (row_buffer) free(row_buffer);
